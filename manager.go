@@ -274,7 +274,7 @@ func paramsToString(params map[string]string) string {
 func (m *jobManager) sync() error {
 	u, err := m.prowClient.Namespace(m.prowNamespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{
-			"ci-chat-bot.openshift.io/launch": "true",
+			"ci-chat-bot-alpha.openshift.io/launch": "true",
 		}).String(),
 	})
 	if err != nil {
