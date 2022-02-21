@@ -418,6 +418,13 @@ func (b *Bot) Start(manager JobManager) error {
 		},
 	})
 
+	slack.Command("tell me a joke", &slacker.CommandDefinition{
+		Description: "Get entertained with a silly joke while waiting for your cluster to be created",
+		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
+			response.Reply(TellAJoke())
+		},
+	})
+
 	klog.Infof("ci-chat-bot up and listening to slack")
 	return slack.Listen(context.Background())
 }

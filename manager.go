@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math"
 	"net/http"
@@ -1066,10 +1067,10 @@ func (m *jobManager) resolveToJob(req *JobRequest) (*Job, error) {
 			return nil, fmt.Errorf("launching a cluster requires one image, version, or pull request")
 		}
 		if len(req.Platform) == 0 {
-			return nil, fmt.Errorf("platform must be set when testing clusters")
+			return nil, fmt.Errorf("platform must be set when playground clusters")
 		}
 		if len(job.JobParams["test"]) == 0 {
-			return nil, fmt.Errorf("a test type is required for testing, see help")
+			return nil, fmt.Errorf("a test type is required for playground, see help")
 		}
 		job.Mode = JobTypeTest
 	case JobTypeWorkflowLaunch:
@@ -1455,4 +1456,60 @@ func (m *jobManager) finishJob(name string) {
 	defer m.muJob.lock.Unlock()
 
 	delete(m.muJob.running, name)
+}
+
+type Joke struct {
+	Success bool `json:"success"`
+	Body    []struct {
+		ID        string        `json:"_id"`
+		Setup     string        `json:"setup"`
+		Punchline string        `json:"punchline"`
+		Type      string        `json:"type"`
+		Likes     []interface{} `json:"likes"`
+		Author    struct {
+			Name string      `json:"name"`
+			ID   interface{} `json:"id"`
+		} `json:"author"`
+		Approved bool `json:"approved"`
+		Date     int  `json:"date"`
+		Nsfw     bool `json:"NSFW"`
+	} `json:"body"`
+}
+
+func TellAJoke() string {
+	failedToGetAJoke := "I failed to get a joke for you :(, try again in a bit please."
+	jokeUrl := "https://api.dadjokes.io/api/random/joke"
+	method := "GET"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, jokeUrl, nil)
+
+	if err != nil {
+		fmt.Println(err)
+		return failedToGetAJoke
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return failedToGetAJoke
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+
+		}
+	}(res.Body)
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return failedToGetAJoke
+	}
+	var joke Joke
+	err = json.Unmarshal(body, &joke)
+	if err != nil {
+		return failedToGetAJoke
+	}
+	theJoke := fmt.Sprintf("%s\n%s", joke.Body[0].Setup, joke.Body[0].Punchline)
+	return theJoke
 }
