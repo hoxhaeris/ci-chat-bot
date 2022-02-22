@@ -100,6 +100,7 @@ type JobManager interface {
 	GetLaunchJob(user string) (*Job, error)
 	LookupInputs(inputs []string) (string, error)
 	ListJobs(users ...string) string
+	ListJobsWithFilters(inputs Filters, users ...string) (string, error)
 }
 
 // JobCallbackFunc is invoked when the job changes state in a significant
@@ -1512,4 +1513,143 @@ func TellAJoke() string {
 	}
 	theJoke := fmt.Sprintf("%s\n%s", joke.Body[0].Setup, joke.Body[0].Punchline)
 	return theJoke
+}
+
+func (m *jobManager) ListJobsWithFilters(f Filters, users ...string) (string, error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	var clusters []*Job
+	var jobs []*Job
+	var totalJobs int
+	var runningClusters int
+	for _, job := range m.jobs {
+		if job.Mode == JobTypeLaunch || job.Mode == JobTypeWorkflowLaunch {
+			if !job.Complete {
+				runningClusters++
+			}
+			clusters = append(clusters, job)
+		} else {
+			totalJobs++
+			if contains(users, job.RequestedBy) {
+				jobs = append(jobs, job)
+			}
+		}
+	}
+	sort.Slice(clusters, func(i, j int) bool {
+		if clusters[i].RequestedAt.Before(clusters[j].RequestedAt) {
+			return true
+		}
+		if clusters[i].Name < clusters[j].Name {
+			return true
+		}
+		return false
+	})
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].RequestedAt.Before(jobs[j].RequestedAt) {
+			return true
+		}
+		if jobs[i].Name < jobs[j].Name {
+			return true
+		}
+		return false
+	})
+
+	buf := &bytes.Buffer{}
+	now := time.Now()
+	if len(clusters) == 0 {
+		fmt.Fprintf(buf, "No clusters up (start time is approximately %d minutes):\n\n", m.estimateCompletion(time.Time{})/time.Minute)
+	} else {
+		fmt.Fprintf(buf, "%d/%d clusters up (start time is approximately %d minutes):\n\n", runningClusters, m.maxClusters, m.estimateCompletion(time.Time{})/time.Minute)
+		for _, job := range clusters {
+			var details string
+			if len(job.URL) > 0 {
+				details = fmt.Sprintf(", <%s|view logs>", job.URL)
+			}
+			var imageOrVersion string
+			var inputParts []string
+			var jobInput JobInput
+			if len(job.Inputs) > 0 {
+				jobInput = job.Inputs[0]
+			}
+			switch {
+			case len(jobInput.Version) > 0:
+				inputParts = append(inputParts, fmt.Sprintf("<https://amd64.ocp.releases.ci.openshift.org/releasetag/%s|%s>", url.PathEscape(jobInput.Version), jobInput.Version))
+			case len(jobInput.Image) > 0:
+				inputParts = append(inputParts, "(image)")
+			}
+			for _, ref := range jobInput.Refs {
+				for _, pull := range ref.Pulls {
+					inputParts = append(inputParts, fmt.Sprintf(" <https://github.com/%s/%s/pull/%d|%s/%s#%d>", url.PathEscape(ref.Org), url.PathEscape(ref.Repo), pull.Number, ref.Org, ref.Repo, pull.Number))
+				}
+			}
+			imageOrVersion = strings.Join(inputParts, ",")
+
+			// summarize the job parameters
+			var options string
+			params := make(map[string]string)
+			for k, v := range job.JobParams {
+				params[k] = v
+			}
+			if len(job.Platform) > 0 {
+				params[job.Platform] = ""
+			}
+			if s := paramsToString(params); len(s) > 0 {
+				options = fmt.Sprintf(" (%s)", s)
+			}
+
+			switch {
+			case job.State == prowapiv1.SuccessState:
+				fmt.Fprintf(buf, "• <@%s>%s - cluster has been shut down%s\n", job.RequestedBy, imageOrVersion, details)
+			case job.State == prowapiv1.FailureState:
+				fmt.Fprintf(buf, "• <@%s>%s%s - cluster failed to start%s\n", job.RequestedBy, imageOrVersion, options, details)
+			case job.Complete:
+				fmt.Fprintf(buf, "• <@%s>%s%s - cluster has requested shut down%s\n", job.RequestedBy, imageOrVersion, options, details)
+			case len(job.Credentials) > 0:
+				fmt.Fprintf(buf, "• <@%s>%s%s - available and will be torn down in %d minutes%s\n", job.RequestedBy, imageOrVersion, options, int(job.ExpiresAt.Sub(now)/time.Minute), details)
+			case len(job.Failure) > 0:
+				fmt.Fprintf(buf, "• <@%s>%s%s - failure: %s%s\n", job.RequestedBy, imageOrVersion, options, job.Failure, details)
+			default:
+				fmt.Fprintf(buf, "• <@%s>%s%s - starting, %d minutes elapsed%s\n", job.RequestedBy, imageOrVersion, options, int(now.Sub(job.RequestedAt)/time.Minute), details)
+			}
+		}
+		fmt.Fprintf(buf, "\n")
+	}
+
+	if len(jobs) > 0 {
+		fmt.Fprintf(buf, "Running jobs:\n\n")
+		for _, job := range jobs {
+			fmt.Fprintf(buf, "• %d minutes ago - ", int(now.Sub(job.RequestedAt)/time.Minute))
+			switch {
+			case job.State == prowapiv1.SuccessState:
+				fmt.Fprint(buf, "*succeeded* ")
+			case job.State == prowapiv1.FailureState:
+				fmt.Fprint(buf, "*failed* ")
+			case len(job.URL) > 0:
+				fmt.Fprint(buf, "running ")
+			default:
+				fmt.Fprint(buf, "pending ")
+			}
+			var details string
+			switch {
+			case len(job.URL) > 0 && len(job.OriginalMessage) > 0:
+				details = fmt.Sprintf("<%s|%s>", job.URL, stripLinks(job.OriginalMessage))
+			case len(job.URL) > 0:
+				details = fmt.Sprintf("<%s|%s>", job.URL, job.JobName)
+			case len(job.OriginalMessage) > 0:
+				details = stripLinks(job.OriginalMessage)
+			default:
+				details = job.JobName
+			}
+			if len(job.RequestedBy) > 0 {
+				details += fmt.Sprintf(" <@%s>", job.RequestedBy)
+			}
+			fmt.Fprintln(buf, details)
+		}
+	} else if totalJobs > 0 {
+		fmt.Fprintf(buf, "\nThere are %d test jobs being run by the bot right now", len(jobs))
+	}
+
+	fmt.Fprintf(buf, "\nbot uptime is %.1f minutes", now.Sub(m.started).Seconds()/60)
+	return buf.String(), nil
 }

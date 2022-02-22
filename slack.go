@@ -104,6 +104,24 @@ func (b *Bot) Start(manager JobManager) error {
 			response.Reply(msg)
 		},
 	})
+
+	slack.Command("listAndFilter <with_a_filter>", &slacker.CommandDefinition{
+		Description: "See who is hogging all the clusters, filter by infrastructure type and/or user. Example usage: list infra=aws ; list infra=aws,user=janedoe; list user=janedoe",
+		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
+			from, err := parseFilters(request.StringParam("with_a_filter", ""))
+			if err != nil {
+				response.Reply(err.Error())
+				return
+			}
+			msg, err := manager.ListJobsWithFilters(from, request.Event().User)
+			if err != nil {
+				response.Reply(err.Error())
+				return
+			}
+			response.Reply(msg)
+		},
+	})
+
 	slack.Command("list", &slacker.CommandDefinition{
 		Description: "See who is hogging all the clusters.",
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
@@ -581,6 +599,32 @@ func parseImageInput(input string) ([]string, error) {
 		}
 	}
 	return parts, nil
+}
+
+type Filters struct {
+	infra string
+	user  string
+}
+
+func parseFilters(input string) (Filters, error) {
+	var toFilter Filters
+	input = strings.TrimSpace(input)
+	if len(input) == 0 {
+		return Filters{}, nil
+	}
+	filters := strings.Split(input, ",")
+	for _, filter := range filters {
+		filterParts := strings.Split(filter, "=")
+		switch filterParts[0] {
+		case "infra":
+			toFilter.infra = filterParts[1]
+		case "user":
+			toFilter.user = filterParts[1]
+		default:
+			return Filters{}, fmt.Errorf("this filter: `%s` is not supported", filterParts[0])
+		}
+	}
+	return toFilter, nil
 }
 
 func stripLinks(input string) string {
