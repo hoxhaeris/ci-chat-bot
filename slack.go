@@ -106,7 +106,7 @@ func (b *Bot) Start(manager JobManager) error {
 	})
 
 	slack.Command("listAndFilter <with_a_filter>", &slacker.CommandDefinition{
-		Description: "See who is hogging all the clusters, filter by infrastructure type and/or user. Example usage: list infra=aws ; list infra=aws,user=janedoe; list user=janedoe",
+		Description: "See who is hogging all the clusters, filter by infrastructure type and/or user. Example usage: list platform=aws ; list platform=aws,user=janedoe; list user=janedoe",
 		Handler: func(request slacker.Request, response slacker.ResponseWriter) {
 			from, err := parseFilters(request.StringParam("with_a_filter", ""))
 			if err != nil {
@@ -602,8 +602,8 @@ func parseImageInput(input string) ([]string, error) {
 }
 
 type Filters struct {
-	infra string
-	user  string
+	platform string
+	user     string
 }
 
 func parseFilters(input string) (Filters, error) {
@@ -616,8 +616,8 @@ func parseFilters(input string) (Filters, error) {
 	for _, filter := range filters {
 		filterParts := strings.Split(filter, "=")
 		switch filterParts[0] {
-		case "infra":
-			toFilter.infra = filterParts[1]
+		case "platform":
+			toFilter.platform = filterParts[1]
 		case "user":
 			toFilter.user = filterParts[1]
 		default:

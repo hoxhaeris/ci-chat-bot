@@ -1529,11 +1529,11 @@ func (m *jobManager) ListJobsWithFilters(f Filters, users ...string) (string, er
 			if !job.Complete {
 				runningClusters++
 			}
-			if f.infra != "" && job.Platform == f.infra {
+			if f.platform != "" && job.Platform == f.platform {
 				clusters = append(clusters, job)
 				filteredClusters++
 			}
-			if f.infra == "" {
+			if f.platform == "" {
 				clusters = append(clusters, job)
 			}
 
@@ -1568,7 +1568,7 @@ func (m *jobManager) ListJobsWithFilters(f Filters, users ...string) (string, er
 	if len(clusters) == 0 {
 		fmt.Fprintf(buf, "No clusters up (start time is approximately %d minutes):\n\n", m.estimateCompletion(time.Time{})/time.Minute)
 	} else {
-		fmt.Fprintf(buf, "%d(%d)/%d %s clusters up (start time is approximately %d minutes):\n\n", filteredClusters, runningClusters, m.maxClusters, f.infra, m.estimateCompletion(time.Time{})/time.Minute)
+		fmt.Fprintf(buf, "%d(%d)/%d %s clusters up (start time is approximately %d minutes):\n\n", filteredClusters, runningClusters, m.maxClusters, f.platform, m.estimateCompletion(time.Time{})/time.Minute)
 		for _, job := range clusters {
 			var details string
 			if len(job.URL) > 0 {
