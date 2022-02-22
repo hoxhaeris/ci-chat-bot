@@ -1523,12 +1523,20 @@ func (m *jobManager) ListJobsWithFilters(f Filters, users ...string) (string, er
 	var jobs []*Job
 	var totalJobs int
 	var runningClusters int
+	var filteredClusters int
 	for _, job := range m.jobs {
 		if job.Mode == JobTypeLaunch || job.Mode == JobTypeWorkflowLaunch {
 			if !job.Complete {
 				runningClusters++
 			}
-			clusters = append(clusters, job)
+			if f.infra != "" && job.Platform == f.infra {
+				clusters = append(clusters, job)
+				filteredClusters++
+			}
+			if f.infra == "" {
+				clusters = append(clusters, job)
+			}
+
 		} else {
 			totalJobs++
 			if contains(users, job.RequestedBy) {
@@ -1560,7 +1568,7 @@ func (m *jobManager) ListJobsWithFilters(f Filters, users ...string) (string, er
 	if len(clusters) == 0 {
 		fmt.Fprintf(buf, "No clusters up (start time is approximately %d minutes):\n\n", m.estimateCompletion(time.Time{})/time.Minute)
 	} else {
-		fmt.Fprintf(buf, "%d/%d clusters up (start time is approximately %d minutes):\n\n", runningClusters, m.maxClusters, m.estimateCompletion(time.Time{})/time.Minute)
+		fmt.Fprintf(buf, "%d(%d)/%d %s clusters up (start time is approximately %d minutes):\n\n", filteredClusters, runningClusters, m.maxClusters, f.infra, m.estimateCompletion(time.Time{})/time.Minute)
 		for _, job := range clusters {
 			var details string
 			if len(job.URL) > 0 {
