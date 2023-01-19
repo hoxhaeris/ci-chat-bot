@@ -128,6 +128,7 @@ type JobManager interface {
 	LookupInputs(inputs []string, architecture string) (string, error)
 	ListJobs(users ...string) string
 	GetWorkflowConfig() *WorkflowConfig
+	ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion, architecture string) (string, string, string, error)
 }
 
 // JobCallbackFunc is invoked when the job changes state in a significant

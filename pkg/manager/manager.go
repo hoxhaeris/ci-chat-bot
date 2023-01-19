@@ -514,8 +514,8 @@ func buildPullSpec(namespace, tagName, isName string) string {
 	return fmt.Sprintf("registry.ci.openshift.org/%s/%s%s%s", namespace, isName, delimiter, tagName)
 }
 
-// resolveImageOrVersion returns installSpec, tag name or version, runSpec, and error
-func (m *jobManager) resolveImageOrVersion(imageOrVersion, defaultImageOrVersion, architecture string) (string, string, string, error) {
+// ResolveImageOrVersion returns installSpec, tag name or version, runSpec, and error
+func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion, architecture string) (string, string, string, error) {
 	if len(strings.TrimSpace(imageOrVersion)) == 0 {
 		if len(defaultImageOrVersion) == 0 {
 			return "", "", "", nil
@@ -743,7 +743,7 @@ func (m *jobManager) GetWorkflowConfig() *WorkflowConfig {
 func (m *jobManager) LookupInputs(inputs []string, architecture string) (string, error) {
 	// default install type jobs to "ci"
 	if len(inputs) == 0 {
-		_, version, _, err := m.resolveImageOrVersion("ci", "", architecture)
+		_, version, _, err := m.ResolveImageOrVersion("ci", "", architecture)
 		if err != nil {
 			return "", err
 		}
@@ -797,7 +797,7 @@ func (m *jobManager) lookupInputs(inputs [][]string, architecture string) ([]Job
 				}
 			} else {
 				// otherwise, resolve as a semantic version (as a tag on the release image stream) or as an image
-				image, version, runImage, err := m.resolveImageOrVersion(part, "", architecture)
+				image, version, runImage, err := m.ResolveImageOrVersion(part, "", architecture)
 				if err != nil {
 					return nil, err
 				}
@@ -925,7 +925,7 @@ func (m *jobManager) resolveToJob(req *JobRequest) (*Job, error) {
 
 	// default install type jobs to "ci"
 	if len(req.Inputs) == 0 && req.Type == JobTypeInstall {
-		_, version, _, err := m.resolveImageOrVersion("ci", "", job.Architecture)
+		_, version, _, err := m.ResolveImageOrVersion("ci", "", job.Architecture)
 		if err != nil {
 			return nil, err
 		}
