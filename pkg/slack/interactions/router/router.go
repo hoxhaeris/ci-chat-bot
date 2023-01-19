@@ -1,6 +1,7 @@
 package router
 
 import (
+	"github.com/openshift/ci-chat-bot/pkg/manager"
 	"github.com/openshift/ci-chat-bot/pkg/slack/interactions"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/launch"
@@ -11,7 +12,7 @@ import (
 
 // ForModals returns a Handler that appropriately routes
 // interaction callbacks for the modals we know about
-func ForModals(client *slack.Client) interactions.Handler {
+func ForModals(client *slack.Client, jobmanager manager.JobManager) interactions.Handler {
 	router := &modalRouter{
 		slackClient:         client,
 		viewsByID:           map[modals.Identifier]slack.ModalViewRequest{},
@@ -19,11 +20,9 @@ func ForModals(client *slack.Client) interactions.Handler {
 	}
 
 	toRegister := []*modals.FlowWithViewAndFollowUps{
-		// sample entry
-		//bug.Register(filer, client),
-		launch.RegisterFirstStep(client),
-		launch.RegisterSecondStep(client),
-		launch.RegisterThirdStep(client),
+		launch.RegisterFirstStep(client, jobmanager),
+		launch.RegisterSecondStep(client, jobmanager),
+		//launch.RegisterThirdStep(client, jobmanager),
 	}
 
 	for _, entry := range toRegister {
