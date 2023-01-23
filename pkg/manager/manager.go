@@ -1036,8 +1036,8 @@ func (m *jobManager) resolveToJob(req *JobRequest) (*Job, error) {
 
 func multistageParamsForPlatform(platform string) sets.String {
 	params := sets.NewString()
-	for param, env := range multistageParameters {
-		if env.platforms.Has(platform) {
+	for param, env := range MultistageParameters {
+		if env.Platforms.Has(platform) {
 			params.Insert(param)
 		}
 	}

@@ -16,10 +16,10 @@ import (
 	"k8s.io/test-infra/prow/github"
 )
 
-type envVar struct {
+type EnvVar struct {
 	name      string
 	value     string
-	platforms sets.String
+	Platforms sets.String
 }
 
 // ConfigResolver finds a ci-operator config for the given tuple of organization, repository,
