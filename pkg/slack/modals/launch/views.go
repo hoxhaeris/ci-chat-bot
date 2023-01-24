@@ -98,13 +98,12 @@ func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manage
 		} else {
 			nightly = fmt.Sprintf("Latest Nightly: %s", nightly)
 		}
-	}
-	var err error
-	_, ci, _, err = jobmanager.ResolveImageOrVersion("ci", "", architecture)
-	if err != nil {
-		ci = fmt.Sprintf("unable to find a release matching \"ci\" for %s", architecture)
-	} else {
-		ci = fmt.Sprintf("Latest CI build: %s", ci)
+		_, ci, _, err = jobmanager.ResolveImageOrVersion("ci", "", architecture)
+		if err != nil {
+			ci = fmt.Sprintf("unable to find a release matching \"ci\" for %s", architecture)
+		} else {
+			ci = fmt.Sprintf("Latest CI build: %s", ci)
+		}
 	}
 
 	return slackClient.ModalViewRequest{
