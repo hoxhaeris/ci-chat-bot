@@ -1,9 +1,11 @@
 package launch
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	slackClient "github.com/slack-go/slack"
+	"net/http"
 	"strings"
 )
 
@@ -67,12 +69,13 @@ func FirstStepView() slackClient.ModalViewRequest {
 	}
 }
 
-func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manager.JobManager) slackClient.ModalViewRequest {
+func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manager.JobManager, httpclient *http.Client) slackClient.ModalViewRequest {
 	platform := "aws"
 	architecture := "amd64"
 	metadata := fmt.Sprintf("Architecture: %s; Platform: %s", architecture, platform)
 	nightly := "error_undefined"
 	ci := "error_undefined"
+	streamsOptions := buildOptions([]string{"error_undefined"})
 	if callback != nil {
 		for key, value := range callback.View.State.Values {
 			switch key {
@@ -104,6 +107,15 @@ func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manage
 		} else {
 			ci = fmt.Sprintf("Latest CI build: %s", ci)
 		}
+		releases, err := fetchReleases(httpclient, architecture)
+		if err != nil {
+
+		}
+		var streams []string
+		for stream, _ := range releases {
+			streams = append(streams, stream)
+		}
+		streamsOptions = buildOptions(streams)
 	}
 
 	return slackClient.ModalViewRequest{
@@ -175,9 +187,7 @@ func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manage
 				Element: &slackClient.SelectBlockElement{
 					Type:        slackClient.OptTypeStatic,
 					Placeholder: &slackClient.TextBlockObject{Type: slackClient.PlainTextType, Text: "Select an entry"},
-					Options: []*slackClient.OptionBlockObject{
-						{Value: "streams", Text: &slackClient.TextBlockObject{Type: slackClient.PlainTextType, Text: "placeholder"}},
-					},
+					Options:     streamsOptions,
 				},
 			},
 			&slackClient.InputBlock{
@@ -238,7 +248,7 @@ func SecondStepView(callback *slackClient.InteractionCallback, jobmanager manage
 	}
 }
 
-func ThirdStepView(callback *slackClient.InteractionCallback, jobmanager manager.JobManager) slackClient.ModalViewRequest {
+func ThirdStepView(callback *slackClient.InteractionCallback, jobmanager manager.JobManager, httpclient *http.Client) slackClient.ModalViewRequest {
 	metaData := ""
 	platform := "aws"
 	options := buildOptions([]string{"error_undefined"})
@@ -271,8 +281,8 @@ func ThirdStepView(callback *slackClient.InteractionCallback, jobmanager manager
 
 			}
 		}
-		options = buildOptions(parameters)
 	}
+
 	return slackClient.ModalViewRequest{
 		Type:            slackClient.VTModal,
 		PrivateMetadata: string(Identifier3rdStep),
@@ -308,4 +318,18 @@ func PrepareNextStepView() *slackClient.ModalViewRequest {
 			},
 		}},
 	}
+}
+
+func fetchReleases(client *http.Client, architecture string) (map[string][]string, error) {
+	url := fmt.Sprintf("https://%s.ocp.releases.ci.openshift.org/api/v1/releasestreams/accepted", architecture)
+	acceptedReleases := make(map[string][]string, 0)
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&acceptedReleases); err != nil {
+		return nil, err
+	}
+	return acceptedReleases, nil
 }

@@ -8,11 +8,12 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/stepsFromApp"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
+	"net/http"
 )
 
 // ForModals returns a Handler that appropriately routes
 // interaction callbacks for the modals we know about
-func ForModals(client *slack.Client, jobmanager manager.JobManager) interactions.Handler {
+func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *http.Client) interactions.Handler {
 	router := &modalRouter{
 		slackClient:         client,
 		viewsByID:           map[modals.Identifier]slack.ModalViewRequest{},
@@ -20,8 +21,8 @@ func ForModals(client *slack.Client, jobmanager manager.JobManager) interactions
 	}
 
 	toRegister := []*modals.FlowWithViewAndFollowUps{
-		launch.RegisterFirstStep(client, jobmanager),
-		launch.RegisterSecondStep(client, jobmanager),
+		launch.RegisterFirstStep(client, jobmanager, httpclient),
+		launch.RegisterSecondStep(client, jobmanager, httpclient),
 		//launch.RegisterThirdStep(client, jobmanager),
 	}
 
