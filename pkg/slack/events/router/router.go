@@ -15,9 +15,9 @@ import (
 
 // ForEvents returns a Handler that appropriately routes
 // event callbacks for the handlers we know about
-func ForEvents(client *slack.Client, manager manager.JobManager, botCommands []slackCommandParser.BotCommand, filer jira.IssueFiler) events.Handler {
+func ForEvents(client *slack.Client, manager manager.JobManager, botCommands []slackCommandParser.BotCommand, filer jira.IssueFiler, aiClient messages.AIClient) events.Handler {
 	return events.MultiHandler(
-		messages.Handle(client, manager, botCommands),
+		messages.Handle(client, manager, botCommands, aiClient),
 		mention.Handler(client),
 		workflowSubmissionEvents.Handler(client, filer),
 		apphome.Handler(client, manager),

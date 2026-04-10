@@ -90,6 +90,9 @@ type options struct {
 	overrideLaunchLabel      string
 	overrideRosaSecretName   string
 
+	// AI service configuration
+	aiServiceURL string
+
 	jiraOptions flagutil.JiraOptions
 }
 
@@ -147,6 +150,9 @@ func run() error {
 	pflag.StringVar(&opt.rosaOIDCConfigId, "rosa-oidcConfigId-path", "", "Path to the OIDC configuration ID")
 	pflag.StringVar(&opt.rosaBillingAccount, "rosa-billingAccount-path", "", "Path to the Billing Account ID.")
 	pflag.BoolVar(&opt.disableRosa, "disable-rosa", false, "Do not load the rosa client")
+
+	// AI service flag
+	pflag.StringVar(&opt.aiServiceURL, "ai-service-url", "", "URL of the AI assistant service (e.g., http://localhost:3000). If empty, AI features are disabled.")
 
 	opt.prowconfig.AddFlags(emptyFlags)
 	opt.GitHubOptions.AddFlags(emptyFlags)
@@ -416,7 +422,7 @@ func run() error {
 		return fmt.Errorf("unable to load initial configuration: %w", err)
 	}
 
-	bot := slack.NewBot(botToken, botSigningSecret, opt.GracePeriod, opt.Port, &workflows)
+	bot := slack.NewBot(botToken, botSigningSecret, opt.GracePeriod, opt.Port, &workflows, opt.aiServiceURL)
 	jiraclient, err := opt.jiraOptions.Client()
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	if err != nil {

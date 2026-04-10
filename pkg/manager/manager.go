@@ -79,8 +79,8 @@ const (
 	// prevent saturating the infrastructure account.
 	maxTotalClusters = 80
 
-	maxTotalMCEAWSClusters = 10 // AWS VPC capacity shared across MCE clusters
-	maxTotalMCEGCPClusters = 10
+	MaxTotalMCEAWSClusters = 10 // AWS VPC capacity shared across MCE clusters
+	MaxTotalMCEGCPClusters = 10
 	MaxMCEDuration         = time.Duration(8 * time.Hour)
 )
 
@@ -2526,11 +2526,11 @@ func (m *jobManager) CreateMceCluster(user, channel, platform string, from [][]s
 		}
 	}
 	m.mceClusters.lock.RUnlock()
-	if platform == "aws" && activeAwsMCEClusterCount >= maxTotalMCEAWSClusters {
-		return "", fmt.Errorf("The maximum number of active AWS MCE clusters (%d) has been reached. Please try again later or launch on GCP.", maxTotalMCEAWSClusters) //nolint:staticcheck
+	if platform == "aws" && activeAwsMCEClusterCount >= MaxTotalMCEAWSClusters {
+		return "", fmt.Errorf("The maximum number of active AWS MCE clusters (%d) has been reached. Please try again later or launch on GCP.", MaxTotalMCEAWSClusters) //nolint:staticcheck
 	}
-	if platform == "gcp" && activeGcpMCEClusterCount >= maxTotalMCEGCPClusters {
-		return "", fmt.Errorf("The maximum number of active GCP MCE clusters (%d) has been reached. Please try again later or launch on AWS.", maxTotalMCEGCPClusters) //nolint:staticcheck
+	if platform == "gcp" && activeGcpMCEClusterCount >= MaxTotalMCEGCPClusters {
+		return "", fmt.Errorf("The maximum number of active GCP MCE clusters (%d) has been reached. Please try again later or launch on AWS.", MaxTotalMCEGCPClusters) //nolint:staticcheck
 	}
 	imageset := ""
 	if len(from) > 0 && len(from[0]) == 1 {
@@ -2780,6 +2780,29 @@ func (m *jobManager) ListMceVersions() string {
 	return fmt.Sprintf("Available versions for MCE clusters: %s", strings.Join(imageVersions, ", "))
 }
 
+func (m *jobManager) GetMceVersions() []string {
+	m.mceClusters.lock.RLock()
+	defer m.mceClusters.lock.RUnlock()
+	imagesets := m.mceClusters.imagesets.UnsortedList()
+	var imageSemVers []semver.Version
+	for _, imageset := range imagesets {
+		if strings.HasSuffix(imageset, "-multi-appsub") {
+			verString := strings.TrimPrefix(strings.TrimSuffix(imageset, "-multi-appsub"), "img")
+			sv, err := semver.ParseTolerant(verString)
+			if err != nil {
+				continue
+			}
+			imageSemVers = append(imageSemVers, sv)
+		}
+	}
+	semver.Sort(imageSemVers)
+	versions := make([]string, 0, len(imageSemVers))
+	for _, v := range imageSemVers {
+		versions = append(versions, fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch))
+	}
+	return versions
+}
+
 func (m *jobManager) CreateRosaCluster(user, channel, version string, duration time.Duration) (string, error) {
 	if duration > m.maxRosaAge {
 		return "", fmt.Errorf("max duration for a ROSA cluster is %s", m.maxRosaAge.String())
@@ -2808,6 +2831,66 @@ func (m *jobManager) CreateRosaCluster(user, channel, version string, duration t
 		return "", fmt.Errorf("failed to create cluster: %w", err)
 	}
 	return fmt.Sprintf("Created cluster `%s` with version `%s`.", cluster.Name(), version), nil
+}
+
+func (m *jobManager) GetRosaVersions() []string {
+	m.rosaVersions.lock.RLock()
+	defer m.rosaVersions.lock.RUnlock()
+	versions := make([]string, len(m.rosaVersions.versions))
+	copy(versions, m.rosaVersions.versions)
+	sort.Sort(sort.Reverse(sort.StringSlice(versions)))
+	return versions
+}
+
+func (m *jobManager) GetQuotaStatus() map[string]QuotaInfo {
+	result := make(map[string]QuotaInfo)
+	if m.lClient == nil {
+		return result
+	}
+	platformSlices := map[string][]string{
+		"aws":   {"aws-quota-slice", "aws-2-quota-slice"},
+		"azure": {"azure4-quota-slice", "azure-2-quota-slice"},
+		"gcp":   {"gcp-quota-slice", "gcp-openshift-gce-devel-ci-2-quota-slice"},
+	}
+	for platform, slices := range platformSlices {
+		var info QuotaInfo
+		for _, s := range slices {
+			metrics, err := m.lClient.Metrics(s)
+			if err != nil {
+				continue
+			}
+			info.Free += metrics.Free
+			info.Leased += metrics.Leased
+		}
+		result[platform] = info
+	}
+	return result
+}
+
+func (m *jobManager) GetCapacityStatus() CapacityStatus {
+	m.lock.RLock()
+	launchClusters := 0
+	for _, job := range m.jobs {
+		if job != nil && (job.Mode == JobTypeLaunch || job.Mode == JobTypeWorkflowLaunch) && !job.Complete && len(job.Failure) == 0 {
+			launchClusters++
+		}
+	}
+	m.lock.RUnlock()
+
+	m.rosaClusters.lock.RLock()
+	rosaActive := len(m.rosaClusters.clusters) + m.rosaClusters.pendingClusters
+	m.rosaClusters.lock.RUnlock()
+
+	m.mceClusters.lock.RLock()
+	mceActive := len(m.mceClusters.clusters)
+	m.mceClusters.lock.RUnlock()
+
+	return CapacityStatus{
+		Prow:           CapacityInfo{Active: launchClusters, Limit: m.maxClusters},
+		ROSA:           CapacityInfo{Active: rosaActive, Limit: m.rosaClusterLimit},
+		MCE:            CapacityInfo{Active: mceActive, Limit: MaxTotalMCEAWSClusters + MaxTotalMCEGCPClusters},
+		MaxJobsPerUser: maxJobsPerUser,
+	}
 }
 
 func (m *jobManager) lookupRosaVersions(prefix string) []string {

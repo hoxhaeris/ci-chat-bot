@@ -131,6 +131,14 @@ func View(jobManager manager.JobManager, user string) slack.HomeTabViewRequest {
 		slack.NewTextBlockObject(slack.MarkdownType, "List All Running MCE Clusters", false, false), nil,
 		slack.NewAccessory(slack.NewButtonBlockElement("mce_list", "mce_list", slack.NewTextBlockObject(slack.PlainTextType, "List", true, false)).WithStyle(slack.StylePrimary)),
 	))
+	// AI Assistant Section
+	addBlockToView(view, slack.NewHeaderBlock(slack.NewTextBlockObject(slack.PlainTextType, "AI Assistant", true, false)))
+	addBlockToView(view, slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, "Ask the AI assistant about cluster-bot commands, options, workflows, and more. Get help constructing commands, understanding errors, and finding the right options.", false, false), nil, nil))
+	addBlockToView(view, slack.NewDividerBlock())
+	addBlockToView(view, slack.NewSectionBlock(
+		slack.NewTextBlockObject(slack.MarkdownType, "Ask a question about cluster-bot", false, false), nil,
+		slack.NewAccessory(slack.NewButtonBlockElement("ask_ai", "ask_ai", slack.NewTextBlockObject(slack.PlainTextType, "Ask AI", true, false)).WithStyle(slack.StylePrimary)),
+	))
 	return *view
 }
 

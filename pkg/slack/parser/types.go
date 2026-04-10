@@ -20,6 +20,9 @@ type SlackClient interface {
 
 	// UploadFileV2 uploads a file to Slack
 	UploadFileV2(params slack.UploadFileV2Parameters) (*slack.FileSummary, error)
+
+	// UpdateMessage updates an existing Slack message
+	UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 }
 
 type Command struct {

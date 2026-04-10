@@ -45,5 +45,6 @@ make
   --kubeconfig-suffix=.config \
   --rosa-oidcConfigId-path=$tmp_oidc_config_id \
   --rosa-billingAccount-path=$tmp_billing_account_id \
+  --ai-service-url=http://localhost:3000 \
   --disable-rosa \
   --v=2

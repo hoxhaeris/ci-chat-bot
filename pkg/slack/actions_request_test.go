@@ -42,6 +42,10 @@ func (m *mockSlackClient) PostMessage(channelID string, options ...slack.MsgOpti
 	return "", "", fmt.Errorf("mock PostMessage not implemented")
 }
 
+func (m *mockSlackClient) UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error) {
+	return "", "", "", fmt.Errorf("mock UpdateMessage not implemented")
+}
+
 // mockJobManager is a mock implementation for testing
 type mockJobManager struct {
 	getOrgDataServiceFunc func() manager.OrgDataService
@@ -113,6 +117,10 @@ func (m *mockJobManager) ListMceVersions() string                        { retur
 func (m *mockJobManager) GetMceUserConfig() *manager.MceConfig           { return nil }
 func (m *mockJobManager) GetUserCluster(user string) *manager.Job        { return nil }
 func (m *mockJobManager) GetGCPAccessManager() *manager.GCPAccessManager { return nil }
+func (m *mockJobManager) GetMceVersions() []string                       { return nil }
+func (m *mockJobManager) GetRosaVersions() []string                      { return nil }
+func (m *mockJobManager) GetQuotaStatus() map[string]manager.QuotaInfo   { return nil }
+func (m *mockJobManager) GetCapacityStatus() manager.CapacityStatus      { return manager.CapacityStatus{} }
 
 // mockOrgDataService is a mock implementation of OrgDataService for testing
 type mockOrgDataService struct {

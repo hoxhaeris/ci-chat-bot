@@ -417,6 +417,8 @@ type JobManager interface {
 	GetManagedClustersForUser(user string) (map[string]*clusterv1.ManagedCluster, map[string]*hivev1.ClusterDeployment, map[string]*hivev1.ClusterProvision, map[string]string, map[string]string)
 	ListManagedClusters(user string) (string, string, []string)
 	ListMceVersions() string
+	GetMceVersions() []string
+	GetRosaVersions() []string
 	GetMceUserConfig() *MceConfig
 	GetUserCluster(user string) *Job
 
@@ -427,6 +429,9 @@ type JobManager interface {
 
 	// Organizational data methods
 	GetOrgDataService() OrgDataService
+
+	GetQuotaStatus() map[string]QuotaInfo
+	GetCapacityStatus() CapacityStatus
 }
 
 // JobCallbackFunc is invoked when the job changes state in a significant
@@ -525,4 +530,21 @@ type MceUser struct {
 	GcpSecret     string `yaml:"gcp_secret,omitempty"`
 	GcpBaseDomain string `yaml:"gcp_base_domain,omitempty"`
 	GcpProjectID  string `yaml:"gcp_project_id,omitempty"`
+}
+
+type QuotaInfo struct {
+	Free   int `json:"free"`
+	Leased int `json:"leased"`
+}
+
+type CapacityInfo struct {
+	Active int `json:"active"`
+	Limit  int `json:"limit"`
+}
+
+type CapacityStatus struct {
+	Prow           CapacityInfo `json:"prow"`
+	ROSA           CapacityInfo `json:"rosa"`
+	MCE            CapacityInfo `json:"mce"`
+	MaxJobsPerUser int          `json:"max_jobs_per_user"`
 }

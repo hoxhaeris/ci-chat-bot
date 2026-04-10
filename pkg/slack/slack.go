@@ -18,6 +18,7 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/utils"
 	hivev1 "github.com/openshift/hive/apis/hive/v1"
 	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 	"k8s.io/klog"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	prowapiv1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
@@ -29,6 +30,7 @@ type Bot struct {
 	GracePeriod      time.Duration
 	Port             int
 	userID           string
+	AIClient         *AIClient
 }
 
 func (b *Bot) JobResponder(s *slack.Client) func(manager.Job) {
@@ -104,18 +106,30 @@ func (b *Bot) MceResponder(s *slack.Client) func(*clusterv1.ManagedCluster, *hiv
 	}
 }
 
-func NewBot(botToken, botSigningSecret string, graceperiod time.Duration, port int, workflowConfig *manager.WorkflowConfig) *Bot {
+func NewBot(botToken, botSigningSecret string, graceperiod time.Duration, port int, workflowConfig *manager.WorkflowConfig, aiServiceURL string) *Bot {
+	var aiClient *AIClient
+	if aiServiceURL != "" {
+		aiClient = NewAIClient(aiServiceURL)
+	}
 	return &Bot{
 		BotToken:         botToken,
 		BotSigningSecret: botSigningSecret,
 		GracePeriod:      graceperiod,
 		Port:             port,
 		userID:           "unknown",
+		AIClient:         aiClient,
 	}
 }
 
 func (b *Bot) SupportedCommands() []parser.BotCommand {
 	return []parser.BotCommand{
+		parser.NewBotCommand("ask <question>", &parser.CommandDefinition{
+			Description: "Ask the AI assistant a question about cluster-bot commands, options, workflows, and more",
+			Example:     "ask how do I launch a cluster on GCP with FIPS?",
+			Handler: func(client parser.SlackClient, jobManager manager.JobManager, event *slackevents.MessageEvent, properties *parser.Properties) string {
+				return HandleAskAI(client, b.AIClient, event, properties)
+			},
+		}, false),
 		parser.NewBotCommand("launch <image_or_version_or_prs> <options>", &parser.CommandDefinition{
 			Description: fmt.Sprintf("Launch an OpenShift cluster using a known image, version, or PR(s). The <image_or_version_or_prs> must contain an Openshift version. You may omit the <options> argument. Arguments can be specified as any number of comma-delimited values. Use `nightly` for the latest OCP build, `ci` for the the latest CI build, provide a version directly from any listed on https://amd64.ocp.releases.ci.openshift.org, a stream name (4.19.0-0.ci, 4.19.0-0.nightly, etc), a major/minor `X.Y` to load the \"next stable\" version, from nightly, for that version (`4.19`), `<org>/<repo>#<pr>` to launch from any combination of PRs, or an image for the first argument. Options is a comma-delimited list of variations including platform (%s), architecture (%s), and variant (%s).",
 				strings.Join(CodeSlice(manager.SupportedPlatforms), ", "),

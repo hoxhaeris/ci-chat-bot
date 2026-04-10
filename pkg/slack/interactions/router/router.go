@@ -5,8 +5,10 @@ import (
 	"net/http"
 
 	"github.com/openshift/ci-chat-bot/pkg/manager"
+	botslack "github.com/openshift/ci-chat-bot/pkg/slack"
 	"github.com/openshift/ci-chat-bot/pkg/slack/interactions"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals"
+	"github.com/openshift/ci-chat-bot/pkg/slack/modals/ask_ai"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/auth"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/done"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/launch/steps"
@@ -24,9 +26,11 @@ import (
 
 // ForModals returns a Handler that appropriately routes
 // interaction callbacks for the modals we know about
-func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *http.Client) interactions.Handler {
+func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *http.Client, aiClient *botslack.AIClient) interactions.Handler {
 	router := &modalRouter{
 		slackClient:         client,
+		fullSlackClient:     client,
+		aiClient:            aiClient,
 		viewsByID:           map[modals.Identifier]slack.ModalViewRequest{},
 		handlersByIDAndType: map[modals.Identifier]map[slack.InteractionType]interactions.Handler{},
 	}
@@ -55,6 +59,7 @@ func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *
 		mcelist.Register(client, jobmanager, httpclient),
 		mcedelete.Register(client, jobmanager),
 		mcelookup.Register(client, jobmanager),
+		ask_ai.Register(client, aiClient),
 	}
 
 	for _, entry := range toRegister {
@@ -66,7 +71,9 @@ func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *
 }
 
 type modalRouter struct {
-	slackClient slackClient
+	slackClient     slackClient
+	fullSlackClient *slack.Client
+	aiClient        *botslack.AIClient
 
 	// viewsById maps callback IDs to modal flows, for triggering
 	// modals as a response to short-cut interaction events
@@ -141,7 +148,23 @@ func (r *modalRouter) viewForApplicationStep(callback *slack.InteractionCallback
 // viewForButton reacts to the a user pressing a button in a bot message
 // to open the a modal view for them
 func (r *modalRouter) viewForButton(callback *slack.InteractionCallback, logger *logrus.Entry) error {
-	id := modals.Identifier(callback.ActionCallback.BlockActions[0].Value)
+	action := callback.ActionCallback.BlockActions[0]
+	id := modals.Identifier(action.Value)
+
+	// Handle the "Ask AI for help" error button
+	if action.ActionID == "ask_ai_error_action" {
+		if r.aiClient != nil && r.fullSlackClient != nil {
+			go botslack.HandleAIErrorHelp(
+				r.fullSlackClient,
+				r.aiClient,
+				callback.User.ID,
+				callback.Channel.ID,
+				action.Value,
+			)
+		}
+		return nil
+	}
+
 	return r.openModal(id, callback.TriggerID, logger)
 }
 

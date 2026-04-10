@@ -39,7 +39,17 @@ var HelpCategories = []string{
 	HelpCategoryManage,
 }
 
-func Handle(client *slack.Client, manager manager.JobManager, botCommands []parser.BotCommand) events.PartialHandler {
+// AIClient defines the interface for AI service interactions used by the message handler.
+type AIClient interface {
+	IsAIThread(threadTS string) bool
+	HandleThreadFollowUp(client parser.SlackClient, event *slackevents.MessageEvent)
+	IsConfigured() bool
+	// HandleErrorSuggestion posts an AI-generated suggestion as a threaded reply
+	// to a command error message. Called asynchronously after the error is posted.
+	HandleErrorSuggestion(client parser.SlackClient, channel, parentTS, userCommand, errorMessage string)
+}
+
+func Handle(client *slack.Client, manager manager.JobManager, botCommands []parser.BotCommand, aiClient AIClient) events.PartialHandler {
 	return events.PartialHandlerFunc("direct-message",
 		func(callback *slackevents.EventsAPIEvent, logger *logrus.Entry) (handled bool, err error) {
 			if callback.Type != slackevents.CallbackEvent {
@@ -49,6 +59,30 @@ func Handle(client *slack.Client, manager manager.JobManager, botCommands []pars
 			if !ok {
 				return false, fmt.Errorf("failed to parse the slack event")
 			}
+			// do not respond to bots
+			if event.BotID != "" {
+				return true, nil
+			}
+			// do not respond to indirect messages
+			if !strings.HasPrefix(event.Channel, "D") {
+				_, _, err := client.PostMessage(event.Channel, slack.MsgOptionText("this command is only accepted via direct message)", false))
+				if err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+			// do not respond if the event SubType is message_changed or file_share( in cases a link is posted and a preview is
+			// added afterwards and when an attachment is included)
+			if event.SubType == "message_changed" || event.SubType == "file_share" {
+				return true, nil
+			}
+
+			// Check if this is a thread reply in an AI conversation
+			if event.ThreadTimeStamp != "" && aiClient != nil && aiClient.IsAIThread(event.ThreadTimeStamp) {
+				go aiClient.HandleThreadFollowUp(client, event)
+				return true, nil
+			}
+
 			mceConfig := manager.GetMceUserConfig()
 			mceConfig.Mutex.RLock()
 			users := mceConfig.Users
@@ -70,23 +104,6 @@ func Handle(client *slack.Client, manager manager.JobManager, botCommands []pars
 				}
 				return true, nil
 			}
-			// do not respond to bots
-			if event.BotID != "" {
-				return true, nil
-			}
-			// do not respond to indirect messages
-			if !strings.HasPrefix(event.Channel, "D") {
-				_, _, err := client.PostMessage(event.Channel, slack.MsgOptionText("this command is only accepted via direct message)", false))
-				if err != nil {
-					return false, err
-				}
-				return true, nil
-			}
-			// do not respond if the event SubType is message_changed or file_share( in cases a link is posted and a preview is
-			// added afterwards and when an attachment is included)
-			if event.SubType == "message_changed" || event.SubType == "file_share" {
-				return true, nil
-			}
 			for _, command := range botCommands {
 				if command.IsPrivate() && !allowed {
 					continue
@@ -94,17 +111,82 @@ func Handle(client *slack.Client, manager manager.JobManager, botCommands []pars
 				properties, match := command.Match(event.Text)
 				if match {
 					response := command.Execute(client, manager, event, properties)
-					if err := postResponse(client, event, response); err != nil {
-						return false, fmt.Errorf("failed all attempts to post the response to the requested action: %s", event.Text)
+					// Empty response means the handler already posted its own response (e.g., AI threaded replies)
+					if response == "" {
+						return true, nil
+					}
+					// Post the response and, if it looks like an error, trigger AI suggestions
+					if isErrorResponse(response) && aiClient != nil && aiClient.IsConfigured() {
+						responseTS, postErr := postResponseReturningTS(client, event, response)
+						if postErr != nil {
+							return false, fmt.Errorf("failed all attempts to post the response to the requested action: %s", event.Text)
+						}
+						go aiClient.HandleErrorSuggestion(client, event.Channel, responseTS, event.Text, response)
+					} else {
+						if err := postResponse(client, event, response); err != nil {
+							return false, fmt.Errorf("failed all attempts to post the response to the requested action: %s", event.Text)
+						}
 					}
 					return true, nil
 				}
 			}
-			if err := postResponse(client, event, "unrecognized command, msg me `help` for a list of all commands"); err != nil {
+			// If AI is configured, route unmatched messages to the AI assistant
+			// instead of showing an error — this allows natural follow-up questions
+			// without requiring the "ask" prefix every time.
+			if aiClient != nil && aiClient.IsConfigured() {
+				go aiClient.HandleThreadFollowUp(client, event)
+				return true, nil
+			}
+			errMsg := "unrecognized command, msg me `help` for a list of all commands"
+			if err := postResponse(client, event, errMsg); err != nil {
 				return false, fmt.Errorf("failed all attempts to post the response to the requested action: %s", event.Text)
 			}
 			return true, nil
 		})
+}
+
+// isErrorResponse returns true if the response looks like a command error
+// that would benefit from AI suggestions.
+func isErrorResponse(response string) bool {
+	errorIndicators := []string{
+		"unrecognized",
+		"configuration error",
+		"unable to find prow job",
+		"could not be found",
+		"not in workflow list",
+		"is not a valid",
+		"options could not be parsed",
+	}
+	lower := strings.ToLower(response)
+	for _, indicator := range errorIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+// postResponseReturningTS posts a response and returns the message timestamp,
+// so a threaded reply can be added.
+func postResponseReturningTS(client *slack.Client, event *slackevents.MessageEvent, response string) (string, error) {
+	var lastErr error
+	var ts string
+	ctx := context.TODO()
+	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+		_, responseTimestamp, err := client.PostMessage(event.Channel, slack.MsgOptionText(response, false))
+		if err != nil {
+			lastErr = err
+			return false, nil
+		}
+		ts = responseTimestamp
+		klog.Infof("Posted response to UserID: %s (event: `%s`) at %s", event.User, event.Text, responseTimestamp)
+		return true, nil
+	})
+	if err != nil {
+		klog.Errorf("Failed to post response to UserID: %s; (event: `%s`) at %d; %v", event.User, event.Text, (time.Now()).Unix(), err)
+		return "", lastErr
+	}
+	return ts, nil
 }
 
 func postResponse(client *slack.Client, event *slackevents.MessageEvent, response string) error {
@@ -125,6 +207,7 @@ func postResponse(client *slack.Client, event *slackevents.MessageEvent, respons
 	}
 	return nil
 }
+
 
 // GenerateHelpOverviewMessage creates the help overview message content
 func GenerateHelpOverviewMessage(allowPrivate bool) string {

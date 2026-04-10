@@ -78,6 +78,10 @@ func (m *mockJobManager) RevokeGCPAccess(email, requestedBy string) (string, err
 }
 func (m *mockJobManager) GetGCPAccessManager() *manager.GCPAccessManager { return nil }
 func (m *mockJobManager) GetOrgDataService() manager.OrgDataService      { return nil }
+func (m *mockJobManager) GetCapacityStatus() manager.CapacityStatus      { return manager.CapacityStatus{} }
+func (m *mockJobManager) GetMceVersions() []string                       { return nil }
+func (m *mockJobManager) GetRosaVersions() []string                      { return nil }
+func (m *mockJobManager) GetQuotaStatus() map[string]manager.QuotaInfo   { return nil }
 
 func TestHasPRMode(t *testing.T) {
 	tests := []struct {

@@ -8,6 +8,10 @@ coverage.out
 golangci-lint.out
 report.json
 
+# Python
+htmlcov/
+__pycache__/
+
 # Environment files with secrets
 .env
 .env.local
