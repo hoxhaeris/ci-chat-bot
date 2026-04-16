@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_CI_CHAT_BOT_URL = os.environ.get("CI_CHAT_BOT_URL", "http://localhost:8080")
+_CI_CHAT_BOT_URL = os.environ.get("CI_CHAT_BOT_INTERNAL_API_URL", "http://127.0.0.1:8081")
 
 # Known options used by check_command to categorise comma-separated tokens.
 KNOWN_PLATFORMS = {

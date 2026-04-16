@@ -96,7 +96,7 @@ func PostAISyncResponse(client parser.SlackClient, aiClient *AIClient, channel, 
 }
 
 // HandleAskAI handles the "ask" command by forwarding the question to the AI service
-// and posting the response as a thread reply.
+// and posting the response as a thread reply. Dispatches the AI call asynchronously.
 func HandleAskAI(client parser.SlackClient, aiClient *AIClient, event *slackevents.MessageEvent, properties *parser.Properties) string {
 	if aiClient == nil || !aiClient.IsConfigured() {
 		return "The AI assistant is not currently available. Please try `help` for command documentation."
@@ -118,16 +118,24 @@ func HandleAskAI(client parser.SlackClient, aiClient *AIClient, event *slackeven
 	// Track this thread as an AI conversation
 	aiClient.TrackAIThread(parentTS)
 
-	req := AskRequest{
-		Question:  question,
-		UserID:    event.User,
-		ThreadID:  parentTS,
-		ChannelID: event.Channel,
-	}
+	// Dispatch AI call asynchronously — the response will be posted in the thread
+	channel := event.Channel
+	userID := event.User
+	go func() {
+		if !aiClient.acquireSem() {
+			return
+		}
+		defer aiClient.releaseSem()
+		req := AskRequest{
+			Question:  question,
+			UserID:    userID,
+			ThreadID:  parentTS,
+			ChannelID: channel,
+		}
+		PostAISyncResponse(client, aiClient, channel, parentTS, req)
+	}()
 
-	PostAISyncResponse(client, aiClient, event.Channel, parentTS, req)
-
-	// Return empty string since we already posted the response in a thread
+	// Return empty string since the response will be posted asynchronously in the thread
 	return ""
 }
 
@@ -202,9 +210,10 @@ func HandleAIErrorHelp(client parser.SlackClient, aiClient *AIClient, userID, ch
 	PostAISyncResponse(client, aiClient, channel, parentTS, req)
 }
 
-// HandleErrorSuggestion posts an AI-generated suggestion as a threaded reply
+// handleErrorSuggestion posts an AI-generated suggestion as a threaded reply
 // to a command error message. The error message has already been posted at parentTS.
-func (c *AIClient) HandleErrorSuggestion(client parser.SlackClient, channel, parentTS, userCommand, errorMessage string) {
+// Called by AIClient.HandleErrorSuggestion which handles concurrency limiting.
+func handleErrorSuggestion(c *AIClient, client parser.SlackClient, channel, parentTS, userCommand, errorMessage string) {
 	if c == nil || !c.IsConfigured() {
 		return
 	}

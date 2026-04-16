@@ -34,7 +34,7 @@ func l(fragment string, children ...simplifypath.Node) simplifypath.Node {
 	return simplifypath.L(fragment, children...)
 }
 
-func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.JobManager, httpclient *http.Client, health *pjutil.Health, iOpts prowflagutil.InstrumentationOptions, clusterBotMetrics *metrics.Metrics) {
+func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.JobManager, httpclient *http.Client, health *pjutil.Health, iOpts prowflagutil.InstrumentationOptions, clusterBotMetrics *metrics.Metrics, internalAPIPort int) {
 	slackclient := slackClient.New(bot.BotToken)
 	jobManager.SetNotifier(bot.JobResponder(slackclient))
 	jobManager.SetRosaNotifier(bot.RosaResponder(slackclient))
@@ -60,21 +60,13 @@ func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.Job
 	))
 	handler := metrics.TraceHandler(simplifier, clusterBotMetrics.HTTPRequestDuration, clusterBotMetrics.HTTPResponseSize)
 	pprof.Instrument(iOpts)
+
+	// Main server: Slack endpoints and health checks (externally accessible)
 	mux := http.NewServeMux()
-	// handle the root to allow for a simple uptime probe
 	mux.Handle("/", handler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { writer.WriteHeader(http.StatusOK) })))
 	mux.Handle("/readyz", handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))) // report ready once the server is up and responding
 	mux.Handle("/slack/events-endpoint", handler(handleEvent(bot.BotSigningSecret, eventrouter.ForEvents(slackclient, jobManager, bot.SupportedCommands(), issueFiler, bot.AIClient))))
 	mux.Handle("/slack/interactive-endpoint", handler(handleInteraction(bot.BotSigningSecret, interactionrouter.ForModals(slackclient, jobManager, httpclient, bot.AIClient))))
-	mux.Handle("/api/v1/jobs/validate", handleJobValidation(jobManager))
-	mux.Handle("/api/v1/jobs/supported", handleSupportedOptions(jobManager))
-	mux.Handle("/api/v1/workflows/validate", handleWorkflowValidation(jobManager))
-	mux.Handle("/api/v1/mce/versions", handleMceVersions(jobManager))
-	mux.Handle("/api/v1/mce/info", handleMceInfo())
-	mux.Handle("/api/v1/rosa/info", handleRosaInfo(jobManager))
-	mux.Handle("/api/v1/hypershift/info", handleHypershiftInfo())
-	mux.Handle("/api/v1/quota/status", handleQuotaStatus(jobManager))
-	mux.Handle("/api/v1/capacity/status", handleCapacityStatus(jobManager))
 	server := &http.Server{Addr: ":" + strconv.Itoa(bot.Port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	health.ServeReady(func() bool {
 		resp, err := http.DefaultClient.Get("http://127.0.0.1:" + strconv.Itoa(bot.Port) + "/readyz")
@@ -86,7 +78,22 @@ func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.Job
 		return err == nil && resp.StatusCode == 200
 	})
 
+	// Internal API server: bound to localhost only, used by the AI assistant sidecar
+	internalMux := http.NewServeMux()
+	internalMux.Handle("/api/v1/jobs/validate", handleJobValidation(jobManager))
+	internalMux.Handle("/api/v1/jobs/supported", handleSupportedOptions(jobManager))
+	internalMux.Handle("/api/v1/workflows/validate", handleWorkflowValidation(jobManager))
+	internalMux.Handle("/api/v1/mce/versions", handleMceVersions(jobManager))
+	internalMux.Handle("/api/v1/mce/info", handleMceInfo())
+	internalMux.Handle("/api/v1/rosa/info", handleRosaInfo(jobManager))
+	internalMux.Handle("/api/v1/hypershift/info", handleHypershiftInfo())
+	internalMux.Handle("/api/v1/quota/status", handleQuotaStatus(jobManager))
+	internalMux.Handle("/api/v1/capacity/status", handleCapacityStatus(jobManager))
+	internalServer := &http.Server{Addr: "127.0.0.1:" + strconv.Itoa(internalAPIPort), Handler: internalMux, ReadHeaderTimeout: 10 * time.Second}
+
 	interrupts.ListenAndServe(server, bot.GracePeriod)
+	interrupts.ListenAndServe(internalServer, bot.GracePeriod)
+	klog.Infof("Internal API server listening on 127.0.0.1:%d", internalAPIPort)
 	interrupts.WaitForGracefulShutdown()
 
 	klog.Infof("ci-chat-bot up and listening to slack")
@@ -343,8 +350,8 @@ func handleRosaInfo(jobManager manager.JobManager) http.HandlerFunc {
 		versions := jobManager.GetRosaVersions()
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"supported_versions":     versions,
-			"max_duration_hours":     8,
-			"default_duration_hours": 6,
+			"max_duration_hours":     int(manager.MaxRosaDuration.Hours()),
+			"default_duration_hours": int(manager.DefaultRosaDuration.Hours()),
 			"commands":               []string{"rosa create <version> <duration>", "rosa lookup <version>", "rosa describe <cluster>"},
 		})
 	}
@@ -356,9 +363,16 @@ func handleHypershiftInfo() http.HandlerFunc {
 		manager.HypershiftSupportedVersions.Mu.RLock()
 		versions := sets.List(manager.HypershiftSupportedVersions.Versions)
 		manager.HypershiftSupportedVersions.Mu.RUnlock()
+
+		var hypershiftPlatforms []string
+		for _, p := range manager.SupportedPlatforms {
+			if strings.HasPrefix(p, "hypershift-") {
+				hypershiftPlatforms = append(hypershiftPlatforms, p)
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"supported_versions": versions,
-			"platforms":          []string{"hypershift-hosted", "hypershift-hosted-powervs"},
+			"platforms":          hypershiftPlatforms,
 			"required_arch":      "multi",
 		})
 	}

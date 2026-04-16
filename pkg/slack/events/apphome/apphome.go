@@ -46,6 +46,13 @@ func View(jobManager manager.JobManager, user string) slack.HomeTabViewRequest {
 	addBlockToView(view, slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, " The App Home doesn't currently support all of Cluster Bot's functionality and may have bugs. Switch to the Messages tab above to use the traditional message commands.", false, false), nil, nil))
 	// Divider
 	addBlockToView(view, slack.NewDividerBlock())
+	// AI Assistant — prominent placement at the top
+	addBlockToView(view, slack.NewSectionBlock(
+		slack.NewTextBlockObject(slack.MarkdownType, ":robot_face: *Need help?* Ask the AI assistant about commands, options, workflows, and more.", false, false), nil,
+		slack.NewAccessory(slack.NewButtonBlockElement("ask_ai", "ask_ai", slack.NewTextBlockObject(slack.PlainTextType, "Ask AI", true, false)).WithStyle(slack.StylePrimary)),
+	))
+	// Divider
+	addBlockToView(view, slack.NewDividerBlock())
 	// Intro
 	addBlockToView(view, slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, "*Cluster Bot gives users the ability to launch and test OpenShift Clusters from any existing custom built releases*\n\n<https://github.com/openshift/ci-chat-bot/blob/master/docs/FAQ.md|Frequently Asked Questions>\n<https://amd64.ocp.releases.ci.openshift.org/|OpenShift Releases>", false, false), nil, nil))
 	// CI Cluster Header
@@ -130,14 +137,6 @@ func View(jobManager manager.JobManager, user string) slack.HomeTabViewRequest {
 	addBlockToView(view, slack.NewSectionBlock(
 		slack.NewTextBlockObject(slack.MarkdownType, "List All Running MCE Clusters", false, false), nil,
 		slack.NewAccessory(slack.NewButtonBlockElement("mce_list", "mce_list", slack.NewTextBlockObject(slack.PlainTextType, "List", true, false)).WithStyle(slack.StylePrimary)),
-	))
-	// AI Assistant Section
-	addBlockToView(view, slack.NewHeaderBlock(slack.NewTextBlockObject(slack.PlainTextType, "AI Assistant", true, false)))
-	addBlockToView(view, slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, "Ask the AI assistant about cluster-bot commands, options, workflows, and more. Get help constructing commands, understanding errors, and finding the right options.", false, false), nil, nil))
-	addBlockToView(view, slack.NewDividerBlock())
-	addBlockToView(view, slack.NewSectionBlock(
-		slack.NewTextBlockObject(slack.MarkdownType, "Ask a question about cluster-bot", false, false), nil,
-		slack.NewAccessory(slack.NewButtonBlockElement("ask_ai", "ask_ai", slack.NewTextBlockObject(slack.PlainTextType, "Ask AI", true, false)).WithStyle(slack.StylePrimary)),
 	))
 	return *view
 }

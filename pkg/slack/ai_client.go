@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,9 @@ const (
 	threadTTL = 24 * time.Hour
 	// threadCleanupInterval is how often we run the cleanup goroutine.
 	threadCleanupInterval = 1 * time.Hour
+	// maxConcurrentAIRequests limits the number of simultaneous AI service calls
+	// to prevent resource exhaustion if users send many messages while the service is slow.
+	maxConcurrentAIRequests = 10
 )
 
 // AIClient is an HTTP client for the AI assistant service.
@@ -32,6 +36,9 @@ type AIClient struct {
 	// The value is the time the thread was first tracked.
 	aiThreads   map[string]time.Time
 	aiThreadsMu sync.RWMutex
+
+	// sem limits the number of concurrent AI requests.
+	sem chan struct{}
 }
 
 // AskRequest is the request body for the AI service /ask endpoint.
@@ -57,9 +64,25 @@ func NewAIClient(serviceURL string) *AIClient {
 			Timeout: 120 * time.Second,
 		},
 		aiThreads: make(map[string]time.Time),
+		sem:       make(chan struct{}, maxConcurrentAIRequests),
 	}
 	go c.cleanupOldThreads()
 	return c
+}
+
+// acquireSem blocks until a concurrency slot is available.
+// Returns false if the client is nil or not configured.
+func (c *AIClient) acquireSem() bool {
+	if c == nil || !c.IsConfigured() {
+		return false
+	}
+	c.sem <- struct{}{}
+	return true
+}
+
+// releaseSem frees a concurrency slot.
+func (c *AIClient) releaseSem() {
+	<-c.sem
 }
 
 // cleanupOldThreads periodically removes thread entries older than threadTTL.
@@ -153,7 +176,7 @@ func (c *AIClient) Ask(req AskRequest) (*AskResponse, error) {
 	})
 
 	if err != nil {
-		if err == wait.ErrWaitTimeout && lastErr != nil {
+		if errors.Is(err, wait.ErrWaitTimeout) && lastErr != nil {
 			return nil, fmt.Errorf("AI service request failed after retries: %w", lastErr)
 		}
 		return nil, err
@@ -199,6 +222,21 @@ func (c *AIClient) IsConfigured() bool {
 }
 
 // HandleThreadFollowUp handles a follow-up message in an existing AI thread.
+// Must be called from a goroutine — blocks until a concurrency slot is available.
 func (c *AIClient) HandleThreadFollowUp(client parser.SlackClient, event *slackevents.MessageEvent) {
+	if !c.acquireSem() {
+		return
+	}
+	defer c.releaseSem()
 	HandleAIThreadFollowUp(client, c, event)
+}
+
+// HandleErrorSuggestion posts an AI-generated suggestion as a threaded reply
+// to a command error message. Must be called from a goroutine.
+func (c *AIClient) HandleErrorSuggestion(client parser.SlackClient, channel, parentTS, userCommand, errorMessage string) {
+	if !c.acquireSem() {
+		return
+	}
+	defer c.releaseSem()
+	handleErrorSuggestion(c, client, channel, parentTS, userCommand, errorMessage)
 }

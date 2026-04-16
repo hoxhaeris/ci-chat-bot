@@ -91,7 +91,8 @@ type options struct {
 	overrideRosaSecretName   string
 
 	// AI service configuration
-	aiServiceURL string
+	aiServiceURL    string
+	internalAPIPort int
 
 	jiraOptions flagutil.JiraOptions
 }
@@ -151,8 +152,9 @@ func run() error {
 	pflag.StringVar(&opt.rosaBillingAccount, "rosa-billingAccount-path", "", "Path to the Billing Account ID.")
 	pflag.BoolVar(&opt.disableRosa, "disable-rosa", false, "Do not load the rosa client")
 
-	// AI service flag
+	// AI service flags
 	pflag.StringVar(&opt.aiServiceURL, "ai-service-url", "", "URL of the AI assistant service (e.g., http://localhost:3000). If empty, AI features are disabled.")
+	pflag.IntVar(&opt.internalAPIPort, "internal-api-port", 8081, "Port for the internal API server (bound to 127.0.0.1 only). Used by the AI assistant service.")
 
 	opt.prowconfig.AddFlags(emptyFlags)
 	opt.GitHubOptions.AddFlags(emptyFlags)
@@ -427,9 +429,9 @@ func run() error {
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	if err != nil {
 		klog.Errorf("failed to load the Jira Client: %s", err)
-		Start(bot, nil, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics)
+		Start(bot, nil, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics, opt.internalAPIPort)
 	} else {
-		Start(bot, jiraclient.JiraClient(), jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics)
+		Start(bot, jiraclient.JiraClient(), jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics, opt.internalAPIPort)
 	}
 
 	return err

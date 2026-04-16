@@ -34,11 +34,29 @@ from .step_registry import (
     list_workflows,
     search_steps,
 )
+from .workspace_files import (
+    clone_openshift_release,
+    ws_grep,
+    ws_list,
+    ws_read_file,
+    ws_tree,
+)
+from .workspace_exec import ws_exec
+from .workspace_sessions import workspace_destroy, workspace_new
 
 
 def get_all_tools() -> list:
     """Return all tool functions for ADK agent registration."""
     return [
+        # Workspace tools (clone and browse repos for CI config questions)
+        clone_openshift_release,
+        workspace_new,
+        workspace_destroy,
+        ws_exec,
+        ws_read_file,
+        ws_grep,
+        ws_list,
+        ws_tree,
         # Cluster bot API tools (call Go bot via localhost)
         validate_job,
         check_command,

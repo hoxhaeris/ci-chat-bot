@@ -82,6 +82,9 @@ const (
 	MaxTotalMCEAWSClusters = 10 // AWS VPC capacity shared across MCE clusters
 	MaxTotalMCEGCPClusters = 10
 	MaxMCEDuration         = time.Duration(8 * time.Hour)
+
+	MaxRosaDuration     = 8 * time.Hour
+	DefaultRosaDuration = 6 * time.Hour
 )
 
 const (

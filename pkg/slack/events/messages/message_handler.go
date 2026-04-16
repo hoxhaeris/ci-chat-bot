@@ -65,7 +65,7 @@ func Handle(client *slack.Client, manager manager.JobManager, botCommands []pars
 			}
 			// do not respond to indirect messages
 			if !strings.HasPrefix(event.Channel, "D") {
-				_, _, err := client.PostMessage(event.Channel, slack.MsgOptionText("this command is only accepted via direct message)", false))
+				_, _, err := client.PostMessage(event.Channel, slack.MsgOptionText("this command is only accepted via direct message", false))
 				if err != nil {
 					return false, err
 				}
@@ -207,7 +207,6 @@ func postResponse(client *slack.Client, event *slackevents.MessageEvent, respons
 	}
 	return nil
 }
-
 
 // GenerateHelpOverviewMessage creates the help overview message content
 func GenerateHelpOverviewMessage(allowPrivate bool) string {
