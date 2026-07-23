@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Tell ADK to use Vertex AI for model access
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "1")
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT",
-                       os.environ.get("GOOGLE_CLOUD_PROJECT", ""))
+                       os.environ.get("GOOGLE_CLOUD_PROJECT", "openshift-crt"))
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION",
                        os.environ.get("GOOGLE_CLOUD_LOCATION", "global"))
 
@@ -151,7 +151,7 @@ Dynamic data tools — use these instead of listing options from memory, since a
 - `lookup_quota_status` / `lookup_capacity_status`: Cloud platform availability and active cluster counts vs. limits.
 
 Research tools:
-- `researcher`: Search cluster-bot docs, verified CRT knowledge, and CRT internal discussions. Use when the user's question may benefit from searching beyond what's in your prompt.
+- `researcher`: Search verified CRT knowledge and CRT internal discussions. Use when the user's question may benefit from searching beyond what's in your prompt.
 - `search_steps` / `get_step_details` / `list_workflows`: Find CI workflows, steps, and chains by name; get documentation, phases, and environment variables.
 
 Release and CI tools:
@@ -176,7 +176,7 @@ Note: A parameter appearing in `list_supported_options` means the bot recognizes
 </tool_usage>
 
 <research_guidelines>
-When you use the researcher tool, it returns findings from documentation and internal discussions. These are background knowledge — they describe what other people have done or discussed, not the user's current situation.
+When you use the researcher tool, it returns findings from verified knowledge and internal discussions. These are background knowledge — they describe what other people have done or discussed, not the user's current situation.
 
 Synthesize research results into a clear, general answer to the user's actual question. Use search results to inform your recommendations rather than narrating them. Answer the question the user asked, not the questions you found in search results. If the user's question is generic (e.g., "how do I launch X?"), give a general answer first, then offer to help with specific configurations.
 
@@ -289,18 +289,13 @@ _DS_PREFIX = f"projects/{_GCP_PROJECT_NUM}/locations/us/collections/default_coll
 
 _DATASTORES = [
     {
-        "name": "cluster_bot_docs",
-        "id": f"{_DS_PREFIX}/cluster-bot-docs",
-        "description": "Authoritative cluster-bot documentation — command reference, FAQ, platforms, workflows.",
-    },
-    {
-        "name": "verified_knowledge_crt",
-        "id": f"{_DS_PREFIX}/verified-knowledge-crt-internal",
+        "name": "verified_knowledge",
+        "id": f"{_DS_PREFIX}/verified-knowledge",
         "description": "Curated, expert-verified knowledge from the CRT team. High confidence.",
     },
     {
         "name": "crt_internal",
-        "id": f"{_DS_PREFIX}/crt-internal",
+        "id": f"{_DS_PREFIX}/v4-crt-internal",
         "description": "CRT team internal Slack discussions and content. Useful for real-world examples but may be informal or outdated.",
     },
 ]
@@ -364,7 +359,7 @@ Return valid JSON only. No markdown, no commentary, no preamble.
 <guidelines>
 - Merge and deduplicate findings across archivists. If multiple found the same info, combine and increase confidence.
 - Rank findings by relevance, then confidence.
-- Source priority: cluster_bot_docs (authoritative documentation, highest) > verified_knowledge_crt (expert-verified) > crt_internal (informal discussions, lowest when conflicting).
+- Source priority: verified_knowledge (expert-verified, highest) > crt_internal (informal discussions, lower when conflicting).
 - Preserve technical details faithfully — keep error messages, commands, and config snippets verbatim.
 - If all archivists returned empty results, set needs_refinement to true with a suggestion for how to refine the query.
 </guidelines>
@@ -418,9 +413,36 @@ try:
     pipeline = SequentialAgent(
         name="researcher",
         sub_agents=[parallel, synthesizer],
-        description="Search cluster-bot docs, verified CRT knowledge, and CRT internal discussions. Use this when the user's question may benefit from searching documentation or internal knowledge beyond what is in your prompt.",
+        description="Search verified CRT knowledge and CRT internal discussions. Use this when the user's question may benefit from searching knowledge beyond what is in your prompt.",
     )
-    researcher_tool = AgentTool(agent=pipeline)
+    _raw_researcher_tool = AgentTool(agent=pipeline)
+
+    class _SafeAgentTool(AgentTool):
+        """AgentTool wrapper that catches sub-agent crashes.
+
+        ADK's ParallelAgent propagates exceptions via TaskGroup.  If an
+        archivist's VertexAiSearchTool fails (e.g. DataStore 404), the
+        unhandled exception would leave an orphaned tool_use in the session
+        without a matching tool_result, permanently corrupting it.
+
+        This wrapper catches any exception from the inner AgentTool and
+        returns an error string so the main agent can continue.
+        """
+
+        async def run_async(self, *, args, tool_context):
+            try:
+                return await _raw_researcher_tool.run_async(
+                    args=args, tool_context=tool_context,
+                )
+            except Exception as exc:
+                logger.warning("Research pipeline failed: %s", exc)
+                return (
+                    '{"error": "Research pipeline unavailable", '
+                    '"message": "Could not search knowledge bases. '
+                    'Answer using your existing knowledge and tools."}'
+                )
+
+    researcher_tool = _SafeAgentTool(agent=pipeline)
     tools.append(researcher_tool)
     logger.info(f"Research pipeline enabled with {len(archivist_agents)} archivists")
 

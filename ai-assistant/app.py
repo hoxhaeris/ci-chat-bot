@@ -101,6 +101,23 @@ async def ask(req: AskRequest):
             f"duration={duration_ms:.0f}ms error={e}",
             exc_info=True,
         )
+        # Delete the corrupted session so the next request starts fresh.
+        # When a sub-agent crashes mid-tool-call, the session retains an
+        # orphaned tool_use without a matching tool_result, which causes
+        # every subsequent request on this thread to fail with a 400.
+        try:
+            await session_service.delete_session(
+                app_name=APP_NAME, user_id=req.user_id, session_id=req.thread_id,
+            )
+            logger.info(
+                f"Deleted corrupted session for user={req.user_id} "
+                f"thread={req.thread_id}"
+            )
+        except Exception:
+            logger.warning(
+                f"Failed to delete session for thread={req.thread_id}",
+                exc_info=True,
+            )
         raise HTTPException(
             status_code=500,
             detail="An internal error occurred while processing your question.",

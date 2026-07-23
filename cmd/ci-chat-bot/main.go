@@ -154,7 +154,7 @@ func run() error {
 
 	// AI service flags
 	pflag.StringVar(&opt.aiServiceURL, "ai-service-url", "", "URL of the AI assistant service (e.g., http://localhost:3000). If empty, AI features are disabled.")
-	pflag.IntVar(&opt.internalAPIPort, "internal-api-port", 8081, "Port for the internal API server (bound to 127.0.0.1 only). Used by the AI assistant service.")
+	pflag.IntVar(&opt.internalAPIPort, "internal-api-port", 8082, "Port for the internal API server (bound to 127.0.0.1 only). Used by the AI assistant service.")
 
 	opt.prowconfig.AddFlags(emptyFlags)
 	opt.GitHubOptions.AddFlags(emptyFlags)
