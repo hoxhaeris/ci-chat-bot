@@ -22,11 +22,11 @@ func Register(client *slack.Client, jobmanager manager.JobManager, httpclient *h
 
 func process(updater *slack.Client, jobManager manager.JobManager, httpclient *http.Client) interactions.Handler {
 	return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-		go func() {
+		common.SafeGo(func() {
 			_, beginning, elements := jobManager.ListManagedClusters("")
 			submission := common.BuildListResultModal(title, beginning, elements)
 			modals.OverwriteView(updater, submission, callback, logger)
-		}()
+		})
 		return modals.SubmitPrepare(title, identifier, logger)
 	})
 }

@@ -103,9 +103,9 @@ func MakeModeStepHandler(
 	return func(updater modals.ViewUpdater, jobmanager manager.JobManager, httpclient *http.Client) interactions.Handler {
 		return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
 			submissionData := modals.MergeCallbackData(callback)
-			go func() {
+			SafeGo(func() {
 				modals.OverwriteView(updater, filterVersionView(callback, jobmanager, submissionData, httpclient, false), callback, logger)
-			}()
+			})
 			return modals.SubmitPrepare(modalTitle, identifier, logger)
 		})
 	}
@@ -147,7 +147,7 @@ func MakeFilterVersionHandler(
 			customBuild := submissionData.Input[modals.LaunchFromCustom]
 			stream := submissionData.Input[modals.LaunchFromStream]
 			hasPR := HasPRMode(submissionData)
-			go func() {
+			SafeGo(func() {
 				if customBuild == "" && stream == "" {
 					modals.OverwriteView(updater, views.FilterVersionView(callback, jobmanager, submissionData, httpclient, true), callback, logger)
 				} else if customBuild != "" && hasPR {
@@ -157,7 +157,7 @@ func MakeFilterVersionHandler(
 				} else {
 					modals.OverwriteView(updater, views.SelectVersionView(callback, jobmanager, httpclient, submissionData, identifier), callback, logger)
 				}
-			}()
+			})
 			return modals.SubmitPrepare(modalTitle, returnIdentifier, logger)
 		})
 	}
@@ -174,13 +174,13 @@ func MakeSelectVersionHandler(
 		return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
 			submissionData := modals.MergeCallbackData(callback)
 			hasPR := HasPRMode(submissionData)
-			go func() {
+			SafeGo(func() {
 				if hasPR {
 					modals.OverwriteView(updater, prInputView(callback, submissionData, identifier), callback, logger)
 				} else {
 					modals.OverwriteView(updater, thirdStepView(callback, jobmanager, httpclient, submissionData, identifier), callback, logger)
 				}
-			}()
+			})
 			return modals.SubmitPrepare(modalTitle, identifier, logger)
 		})
 	}
@@ -248,9 +248,9 @@ func MakeFirstStepHandler(
 				}
 			}
 
-			go func() {
+			SafeGo(func() {
 				modals.OverwriteView(updater, selectModeView(callback, jobmanager, callbackData), callback, logger)
-			}()
+			})
 			return modals.SubmitPrepare(modalTitle, identifier, logger)
 		})
 	}

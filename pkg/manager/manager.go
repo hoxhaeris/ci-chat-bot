@@ -1248,6 +1248,9 @@ func buildPullSpec(namespace, tagName, isName string) string {
 }
 
 func pullSpecForTagRef(tag *imagev1.TagReference, namespace, isName string) string {
+	if tag == nil {
+		return ""
+	}
 	if tag.Reference && tag.From != nil && tag.From.Kind == "DockerImage" && tag.From.Name != "" {
 		return tag.From.Name
 	}
@@ -1339,6 +1342,9 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					runSpec = installSpec
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.nightly", unresolved))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.nightly release is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1351,6 +1357,9 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					runSpec = installSpec
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.ci", unresolved))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.ci release is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1362,7 +1371,12 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 				if architecture == "amd64" || architecture == "multi" {
 					runSpec = installSpec
 				} else {
-					runTag := findNewestImageSpecTagWithStream(amd64IS, unresolved)
+					// stable releases are named "<major>-stable" rather than the bare major.minor,
+					// so resolve the amd64 companion the same way we resolved the arch-specific tag above
+					runTag := findNewestStableImageSpecTagBySemanticMajor(amd64IS, unresolved, "amd64")
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no amd64 stable release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1401,9 +1415,15 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Image, err)
 					}
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				} else {
 					runTag, _ := findImageStatusTag(amd64IS, unresolved)
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = buildPullSpec("ocp", runTag.Image, "release")
 				}
 			}
@@ -1426,9 +1446,15 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Name, err)
 					}
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, unresolved)
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 			}

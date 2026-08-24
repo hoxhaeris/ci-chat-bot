@@ -24,7 +24,7 @@ func Register(client *slack.Client, jobmanager manager.JobManager, httpclient *h
 // process has custom kubeconfig and cluster selection logic
 func process(updater *slack.Client, jobManager manager.JobManager, httpclient *http.Client) interactions.Handler {
 	return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-		go func() {
+		common.SafeGo(func() {
 			var name, msg, kubeconfig string
 			managed, deployments, provisions, kubeconfigs, passwords := jobManager.GetManagedClustersForUser(callback.User.ID)
 			if len(managed) == 0 {
@@ -43,7 +43,7 @@ func process(updater *slack.Client, jobManager manager.JobManager, httpclient *h
 			submission := modals.SubmissionView(title, msg)
 			common.AppendKubeconfigBlock(&submission, kubeconfig, "KubeConfig File (to download the kubeconfig as a file, type `mce auth` in the Messages tab):")
 			modals.OverwriteView(updater, submission, callback, logger)
-		}()
+		})
 		return modals.SubmitPrepare(title, identifier, logger)
 	})
 }

@@ -25,7 +25,7 @@ func Register(client *slack.Client, jobmanager manager.JobManager) *modals.FlowW
 
 func process(updater *slack.Client, jobmanager manager.JobManager) interactions.Handler {
 	return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-		go func() {
+		common.SafeGo(func() {
 			inputs := modals.CallBackInputAll(callback)
 			var filters manager.ListFilters
 			for key, input := range inputs {
@@ -41,7 +41,7 @@ func process(updater *slack.Client, jobmanager manager.JobManager) interactions.
 			_, beginning, elements := jobmanager.ListJobs(callback.User.ID, filters)
 			submission := common.BuildListResultModal(title, beginning, elements)
 			modals.OverwriteView(updater, submission, callback, logger)
-		}()
+		})
 		return modals.SubmitPrepare(title, identifier, logger)
 	})
 }

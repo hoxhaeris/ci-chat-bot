@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -98,6 +99,11 @@ func handleEvent(signingSecret string, handler eventhandler.Handler) http.Handle
 		writer.WriteHeader(http.StatusOK)
 		// we don't really care how long this takes
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					klog.Errorf("Recovered from panic while handling event: %v\n%s", r, debug.Stack())
+				}
+			}()
 			if err := handler.Handle(&event, logger); err != nil {
 				klog.Errorf("Failed to handle event: %v", err)
 			}

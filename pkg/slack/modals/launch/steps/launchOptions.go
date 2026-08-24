@@ -8,6 +8,7 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	"github.com/openshift/ci-chat-bot/pkg/slack/interactions"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals"
+	"github.com/openshift/ci-chat-bot/pkg/slack/modals/common"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/launch"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
@@ -62,14 +63,14 @@ func processLaunchOptionsStep(updater *slack.Client, jobmanager manager.JobManag
 		if errorResponse != nil {
 			return errorResponse, nil
 		}
-		go func() {
+		common.SafeGo(func() {
 			msg, err := jobmanager.LaunchJobForUser(job)
 			if err != nil {
 				modals.OverwriteView(updater, modals.SubmissionView(launch.ModalTitle, err.Error()), callback, logger)
 			} else {
 				modals.OverwriteView(updater, modals.SubmissionView(launch.ModalTitle, msg), callback, logger)
 			}
-		}()
+		})
 		return modals.SubmitPrepare(launch.ModalTitle, string(launch.Identifier3rdStep), logger)
 	})
 }
