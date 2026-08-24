@@ -4,6 +4,7 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	"github.com/openshift/ci-chat-bot/pkg/slack/interactions"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals"
+	"github.com/openshift/ci-chat-bot/pkg/slack/modals/common"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 )
@@ -20,7 +21,7 @@ func Register(client *slack.Client, jobmanager manager.JobManager) *modals.FlowW
 // process has custom logic and can't use MakeSimpleProcessHandler
 func process(updater *slack.Client, jobManager manager.JobManager) interactions.Handler {
 	return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-		go func() {
+		common.SafeGo(func() {
 			managed, _, _, _, _ := jobManager.GetManagedClustersForUser(callback.User.ID)
 			if len(managed) == 0 {
 				msg := "You do not have any running MCE Clusters."
@@ -45,7 +46,7 @@ func process(updater *slack.Client, jobManager manager.JobManager) interactions.
 				return
 			}
 			modals.OverwriteView(updater, modals.SubmissionView(title, msg), callback, logger)
-		}()
+		})
 		return modals.SubmitPrepare(title, identifier, logger)
 	})
 }

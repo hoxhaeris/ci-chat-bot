@@ -8,6 +8,7 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	"github.com/openshift/ci-chat-bot/pkg/slack/interactions"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals"
+	"github.com/openshift/ci-chat-bot/pkg/slack/modals/common"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/mce/create"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
@@ -35,7 +36,7 @@ func processLaunchOptionsStep(updater *slack.Client, jobmanager manager.JobManag
 				createInputs = append(createInputs, strings.TrimSpace(pr))
 			}
 		}
-		go func() {
+		common.SafeGo(func() {
 			// the channel ID is empty for app home messages; identify the user's IM channel
 			conversation, _, _, err := updater.OpenConversation(&slack.OpenConversationParameters{Users: []string{callback.User.ID}})
 			if err != nil {
@@ -51,7 +52,7 @@ func processLaunchOptionsStep(updater *slack.Client, jobmanager manager.JobManag
 			} else {
 				modals.OverwriteView(updater, modals.SubmissionView(create.ModalTitle, msg), callback, logger)
 			}
-		}()
+		})
 		return modals.SubmitPrepare(create.ModalTitle, string(create.Identifier3rdStep), logger)
 	})
 }

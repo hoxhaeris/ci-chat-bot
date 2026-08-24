@@ -45,14 +45,14 @@ func MakeSimpleProcessHandler(
 ) func(*slack.Client, manager.JobManager) interactions.Handler {
 	return func(updater *slack.Client, jobManager manager.JobManager) interactions.Handler {
 		return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-			go func() {
+			SafeGo(func() {
 				msg, err := actionFunc(jobManager, callback)
 				if err != nil {
 					modals.OverwriteView(updater, modals.ErrorView(errorContext, err), callback, logger)
 					return
 				}
 				modals.OverwriteView(updater, modals.SubmissionView(title, msg), callback, logger)
-			}()
+			})
 			return modals.SubmitPrepare(title, identifier, logger)
 		})
 	}
