@@ -762,6 +762,27 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 					klog.Infof("Found target job config:\n%s", string(data))
 				}
 
+				// The `build` command creates release images; it cannot build an operator
+				// catalog. If the PR targets an operator repository (one that declares
+				// operator bundles), redirect the user to `catalog build` instead of letting
+				// the job run down the wrong path and fail with a confusing error (e.g. the
+				// operator install step running against the build farm, or promotion failing).
+				// This runs before processOperatorPR so the redirect takes precedence over
+				// any operator-test resolution error that call would otherwise return.
+				if job.Mode == JobTypeBuild && targetConfig.Operator != nil && len(targetConfig.Operator.Bundles) > 0 {
+					var bundles []string
+					for _, bundle := range targetConfig.Operator.Bundles {
+						if bundle.As != "" {
+							bundles = append(bundles, bundle.As)
+						}
+					}
+					hint := "<bundle_name>"
+					if len(bundles) > 0 {
+						hint = strings.Join(bundles, " | ")
+					}
+					return "", fmt.Errorf("%s/%s is an operator repository, so the `build` command (which creates release images) cannot build its catalog. Use `catalog build <version>,%s/%s#<pr> <bundle_name>` instead (available bundles: %s)", ref.Org, ref.Repo, ref.Org, ref.Repo, hint)
+				}
+
 				newOperatorRepo, err := processOperatorPR(operatorRepo, sourceConfig, targetConfig, job, &ref, pj)
 				if err != nil {
 					return "", err
