@@ -1424,7 +1424,13 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
 					}
-					runSpec = buildPullSpec("ocp", runTag.Image, "release")
+					// QCI-backed releases have an empty Image field; fall back to the
+					// DockerImageReference so we don't build a trailing-colon pullspec.
+					if len(runTag.Image) == 0 {
+						runSpec = runTag.DockerImageReference
+					} else {
+						runSpec = buildPullSpec("ocp", runTag.Image, "release")
+					}
 				}
 			}
 			return installSpec, name, runSpec, nil
@@ -1468,11 +1474,13 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 			if architecture == "amd64" || architecture == "multi" {
 				runSpec = installSpec
 			} else {
-				if runTag := findSpecTagByName(amd64IS, unresolved); runTag != nil {
-					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
-				} else {
-					runSpec = installSpec
+				runTag := findSpecTagByName(amd64IS, unresolved)
+				if runTag == nil {
+					// the arm64 installSpec cannot run the job on the amd64 build
+					// farm, so error out rather than reusing it as the runner image
+					return "", "", "", fmt.Errorf("no amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
 				}
+				runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 			}
 			return installSpec, tag.Name, runSpec, nil
 		}
