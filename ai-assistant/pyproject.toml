@@ -17,6 +17,10 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.24.0",
     "anthropic[vertex]>=0.40.0",
+    # Imported directly by tools/ship_help_research.py (MCP client to
+    # ship-help-bot). Already present transitively via google-adk; declared
+    # explicitly because we import it directly.
+    "mcp>=1.9.0",
 ]
 
 [project.optional-dependencies]

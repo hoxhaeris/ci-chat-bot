@@ -1,7 +1,8 @@
 """ADK Agent definition for the cluster-bot AI assistant.
 
-Creates a Google ADK Agent with Claude Sonnet via Vertex AI,
-cluster-bot tools, and Vertex AI Search for documentation retrieval.
+Creates a Google ADK Agent with Claude via Vertex AI, cluster-bot tools, and a
+`researcher` tool that delegates knowledge/troubleshooting research to
+ship-help-bot's `ask_persona` over MCP.
 """
 
 import json
@@ -10,17 +11,14 @@ import os
 from pathlib import Path
 
 from google.adk.agents import Agent
-from google.adk.agents.llm_agent import LlmAgent
-from google.adk.agents.parallel_agent import ParallelAgent
-from google.adk.agents.sequential_agent import SequentialAgent
 from google.adk.models import anthropic_llm as _anthropic_llm
 from google.adk.models.anthropic_llm import Claude
 from google.adk.models.registry import LLMRegistry
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.agent_tool import AgentTool
 
 from tools import get_all_tools
+from tools.ship_help_research import researcher
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +71,6 @@ _anthropic_llm.part_to_message_block = _patched_part_to_message_block
 
 APP_NAME = "cluster-bot-ai"
 MODEL = os.environ.get("AI_MODEL", "claude-opus-4-6")
-RESEARCH_MODEL = os.environ.get("AI_RESEARCH_MODEL", "gemini-2.5-pro")
 
 # ---------------------------------------------------------------------------
 # Instructions
@@ -150,37 +147,18 @@ Dynamic data tools — use these instead of listing options from memory, since a
 - `lookup_hypershift_versions`: Hypershift version availability.
 - `lookup_quota_status` / `lookup_capacity_status`: Cloud platform availability and active cluster counts vs. limits.
 
-Research tools:
-- `researcher`: Search verified CRT knowledge and CRT internal discussions. Use when the user's question may benefit from searching beyond what's in your prompt.
-- `search_steps` / `get_step_details` / `list_workflows`: Find CI workflows, steps, and chains by name; get documentation, phases, and environment variables.
-
-Release and CI tools:
-- Release controller tools: Look up release streams, accepted versions, and version details.
-- Prow tools: Analyze CI job results, search build logs, and check job status.
-
-Workspace tools (browse CI configuration in openshift/release):
-- `clone_openshift_release`: Clone openshift/release into a workspace for browsing ci-operator configs. Use when you need to check actual config files to answer a user's question about CI setup, catalog builds, test definitions, or operator bundles.
-- `ws_list` / `ws_tree`: Browse directory structure in a cloned workspace.
-- `ws_read_file`: Read a specific file (ci-operator config, Prow job definition, etc.).
-- `ws_grep`: Search for patterns across workspace files (e.g., find all tests referencing a bundle name).
-- `ws_exec`: Run shell commands in workspace (git, grep, find, etc.).
-- `workspace_new` / `workspace_destroy`: Manual workspace management. Prefer `clone_openshift_release` for the common case.
-- Always call `workspace_destroy` when done browsing to free disk space.
-
-Use workspace tools when:
-- A user reports an error with `catalog build`, `test`, or workflow commands and you need to check what's actually configured
-- You need to verify a specific repo's ci-operator config (tests, images, bundles, dependencies)
-- The step registry tools don't have enough detail about a repo's CI setup
+Research and troubleshooting:
+- `researcher`: The single tool for anything beyond command construction and validation. It delegates to the OpenShift CI help expert (ship-help-bot), which searches verified CRT knowledge, CRT/OCP Slack history, Jira, GitHub source, and curated docs, and can investigate live CI state — Prow job results and build logs, release streams and versions, the step registry and ci-operator configs, and source code. Use it for "why did X fail", error diagnosis, CI-config and catalog/bundle questions, release/version lookups, and any knowledge not already in your prompt. It returns a synthesized, grounded answer; if it is unavailable, say so and answer from your prompt knowledge.
 
 Note: A parameter appearing in `list_supported_options` means the bot recognizes it, not that it works in every combination. Always use `validate_job` to check specific platform + version + params combos.
 </tool_usage>
 
 <research_guidelines>
-When you use the researcher tool, it returns findings from verified knowledge and internal discussions. These are background knowledge — they describe what other people have done or discussed, not the user's current situation.
+The researcher tool returns a synthesized, grounded answer from the OpenShift CI help expert — drawn from verified knowledge, team discussions, Jira, GitHub, docs, and live CI investigation. Treat its answer as authoritative research input, but keep your reply focused on the user's actual cluster-bot question.
 
-Synthesize research results into a clear, general answer to the user's actual question. Use search results to inform your recommendations rather than narrating them. Answer the question the user asked, not the questions you found in search results. If the user's question is generic (e.g., "how do I launch X?"), give a general answer first, then offer to help with specific configurations.
+Adapt the research into a clear, direct answer in cluster-bot's voice and response style — don't narrate the research or dump it verbatim; extract what answers the question. If the researcher reports it is unavailable, say so briefly and answer from your prompt knowledge, noting the limitation.
 
-Avoid presenting other people's specific attempts or failures as if they relate to the user's situation. Avoid assuming the user wants the same version, platform, or configuration mentioned in search results.
+Avoid presenting other people's specific past attempts, versions, or configurations as if they are the user's situation.
 </research_guidelines>
 
 <command_reference>
@@ -280,174 +258,14 @@ Note that not all platform + version + parameter combinations have backing Prow 
 tools = get_all_tools()
 
 # ---------------------------------------------------------------------------
-# Research pipeline: archivist sub-agents searching datastores in parallel,
-# then a synthesizer combining results (same pattern as ship-help-bot).
+# Research: delegated to ship-help-bot's `ask_persona` over MCP.
+# `researcher()` returns a synthesized, grounded answer (Slack history, Jira,
+# GitHub, curated docs, verified knowledge) and degrades gracefully to local
+# tools/prompt knowledge if the MCP backend is unset or unreachable. Config
+# via SHIP_HELP_MCP_URL / SHIP_HELP_MCP_TOKEN (see tools/ship_help_research.py).
 # ---------------------------------------------------------------------------
 
-_GCP_PROJECT_NUM = "455839488177"
-_DS_PREFIX = f"projects/{_GCP_PROJECT_NUM}/locations/us/collections/default_collection/dataStores"
-
-_DATASTORES = [
-    {
-        "name": "verified_knowledge",
-        "id": f"{_DS_PREFIX}/verified-knowledge",
-        "description": "Curated, expert-verified knowledge from the CRT team. High confidence.",
-    },
-    {
-        "name": "crt_internal",
-        "id": f"{_DS_PREFIX}/v4-crt-internal",
-        "description": "CRT team internal Slack discussions and content. Useful for real-world examples but may be informal or outdated.",
-    },
-]
-
-_ARCHIVIST_INSTRUCTION = """<role>
-You are an archivist — a specialized research agent with access to a datastore of indexed documents. Given a research question, query your datastore, evaluate the results for relevance and confidence, and return a structured JSON report.
-</role>
-
-<output_format>
-Return valid JSON only. No markdown, no commentary, no preamble.
-
-{
-  "archivist": "<your name>",
-  "archivist_description": "<what your datastore contains>",
-  "archivist_summary": "<2-3 sentences: are results useful? what should the coordinator focus on?>",
-  "archives": [
-    {
-      "relevance": 0.0,
-      "confidence": 0.0,
-      "summary": "<1-2 sentence summary>",
-      "detail": "<relevant content, quotes, or technical details>"
-    }
-  ]
-}
-</output_format>
-
-<guidelines>
-- relevance (0.0-1.0): how directly the result answers the question.
-- confidence (0.0-1.0): how confident you are in accuracy and completeness.
-- Return up to 5 entries, ranked by relevance (highest first).
-- Omit results with relevance below 0.3.
-- If nothing is relevant, return empty archives and explain in archivist_summary.
-- Prefer recent information over older when they conflict.
-- Include enough detail that the coordinator does not need to re-query — preserve commands, error messages, and config snippets verbatim.
-</guidelines>
-"""
-
-_SYNTHESIZER_INSTRUCTION_TEMPLATE = """<role>
-You are a research synthesizer. Multiple archivists have queried their datastores in parallel and stored their results in session state. Combine their findings into a single report for the coordinator.
-</role>
-
-<output_format>
-Return valid JSON only. No markdown, no commentary, no preamble.
-
-{{
-  "synthesis_summary": "<3-5 sentences: what was found, confidence level, gaps remaining>",
-  "needs_refinement": false,
-  "refinement_suggestion": "<if needs_refinement, suggest how to refine the question>",
-  "findings": [
-    {{
-      "relevance": 0.0,
-      "confidence": 0.0,
-      "source_archivist": "<which archivist>",
-      "summary": "<finding summary>",
-      "detail": "<detailed content>"
-    }}
-  ]
-}}
-</output_format>
-
-<guidelines>
-- Merge and deduplicate findings across archivists. If multiple found the same info, combine and increase confidence.
-- Rank findings by relevance, then confidence.
-- Source priority: verified_knowledge (expert-verified, highest) > crt_internal (informal discussions, lower when conflicting).
-- Preserve technical details faithfully — keep error messages, commands, and config snippets verbatim.
-- If all archivists returned empty results, set needs_refinement to true with a suggestion for how to refine the query.
-</guidelines>
-
-<archivist_results>
-{state_refs}
-</archivist_results>
-"""
-
-try:
-    from google.adk.tools import VertexAiSearchTool
-
-    archivist_agents = []
-    archivist_names = []
-
-    for ds in _DATASTORES:
-        search_tool = VertexAiSearchTool(data_store_id=ds["id"])
-        archivist = LlmAgent(
-            name=ds["name"],
-            model=RESEARCH_MODEL,
-            instruction=_ARCHIVIST_INSTRUCTION + f"\nYour datastore: {ds['description']}",
-            description=f"Archivist querying '{ds['name']}' datastore.",
-            tools=[search_tool],
-            output_key=ds["name"],
-        )
-        archivist_agents.append(archivist)
-        archivist_names.append(ds["name"])
-        logger.info(f"Archivist created: {ds['name']} -> {ds['id']}")
-
-    # Build synthesizer instruction with state variable references
-    state_refs = "\n".join(
-        f"- `{{{ds['name']}}}`: {ds['description']}"
-        for ds in _DATASTORES
-    )
-    synthesizer_instruction = _SYNTHESIZER_INSTRUCTION_TEMPLATE.replace(
-        "{state_refs}", state_refs
-    )
-
-    synthesizer = LlmAgent(
-        name="research_synthesizer",
-        model=RESEARCH_MODEL,
-        instruction=synthesizer_instruction,
-        description="Combines archivist results into a unified research report.",
-    )
-
-    # Pipeline: run archivists in parallel, then synthesize
-    parallel = ParallelAgent(
-        name="research_parallel",
-        sub_agents=archivist_agents,
-    )
-    pipeline = SequentialAgent(
-        name="researcher",
-        sub_agents=[parallel, synthesizer],
-        description="Search verified CRT knowledge and CRT internal discussions. Use this when the user's question may benefit from searching knowledge beyond what is in your prompt.",
-    )
-    _raw_researcher_tool = AgentTool(agent=pipeline)
-
-    class _SafeAgentTool(AgentTool):
-        """AgentTool wrapper that catches sub-agent crashes.
-
-        ADK's ParallelAgent propagates exceptions via TaskGroup.  If an
-        archivist's VertexAiSearchTool fails (e.g. DataStore 404), the
-        unhandled exception would leave an orphaned tool_use in the session
-        without a matching tool_result, permanently corrupting it.
-
-        This wrapper catches any exception from the inner AgentTool and
-        returns an error string so the main agent can continue.
-        """
-
-        async def run_async(self, *, args, tool_context):
-            try:
-                return await _raw_researcher_tool.run_async(
-                    args=args, tool_context=tool_context,
-                )
-            except Exception as exc:
-                logger.warning("Research pipeline failed: %s", exc)
-                return (
-                    '{"error": "Research pipeline unavailable", '
-                    '"message": "Could not search knowledge bases. '
-                    'Answer using your existing knowledge and tools."}'
-                )
-
-    researcher_tool = _SafeAgentTool(agent=pipeline)
-    tools.append(researcher_tool)
-    logger.info(f"Research pipeline enabled with {len(archivist_agents)} archivists")
-
-except Exception as e:
-    logger.warning(f"Failed to initialize research pipeline: {e}")
+tools.append(researcher)
 
 # ---------------------------------------------------------------------------
 # Agent, session service, runner
