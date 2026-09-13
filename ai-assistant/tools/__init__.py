@@ -24,6 +24,7 @@ from .cluster_bot_api import (
     validate_job,
     validate_workflow,
 )
+from .response_ui import set_followup_buttons, set_run_commands
 
 
 def get_all_tools() -> list:
@@ -46,4 +47,8 @@ def get_all_tools() -> list:
         lookup_hypershift_versions,
         lookup_quota_status,
         lookup_capacity_status,
+        # Response UI: follow-up quick-action buttons + runnable command
+        # buttons (rendered by the Go bot).
+        set_followup_buttons,
+        set_run_commands,
     ]

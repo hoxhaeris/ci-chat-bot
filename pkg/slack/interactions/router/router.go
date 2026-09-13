@@ -3,6 +3,7 @@ package router
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	botslack "github.com/openshift/ci-chat-bot/pkg/slack"
@@ -20,17 +21,20 @@ import (
 	mcelookup "github.com/openshift/ci-chat-bot/pkg/slack/modals/mce/lookup"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/refresh"
 	"github.com/openshift/ci-chat-bot/pkg/slack/modals/stepsFromApp"
+	"github.com/openshift/ci-chat-bot/pkg/slack/parser"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 )
 
 // ForModals returns a Handler that appropriately routes
 // interaction callbacks for the modals we know about
-func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *http.Client, aiClient *botslack.AIClient) interactions.Handler {
+func ForModals(client *slack.Client, jobmanager manager.JobManager, httpclient *http.Client, aiClient *botslack.AIClient, commands []parser.BotCommand) interactions.Handler {
 	router := &modalRouter{
 		slackClient:         client,
 		fullSlackClient:     client,
 		aiClient:            aiClient,
+		jobManager:          jobmanager,
+		commands:            commands,
 		viewsByID:           map[modals.Identifier]slack.ModalViewRequest{},
 		handlersByIDAndType: map[modals.Identifier]map[slack.InteractionType]interactions.Handler{},
 	}
@@ -74,6 +78,8 @@ type modalRouter struct {
 	slackClient     slackClient
 	fullSlackClient *slack.Client
 	aiClient        *botslack.AIClient
+	jobManager      manager.JobManager
+	commands        []parser.BotCommand
 
 	// viewsById maps callback IDs to modal flows, for triggering
 	// modals as a response to short-cut interaction events
@@ -159,6 +165,46 @@ func (r *modalRouter) viewForButton(callback *slack.InteractionCallback, logger 
 				r.aiClient,
 				callback.User.ID,
 				callback.Channel.ID,
+				action.Value,
+			)
+		}
+		return nil
+	}
+
+	// Handle AI follow-up quick-action buttons (action_id "ai_followup_action_<n>").
+	if strings.HasPrefix(action.ActionID, "ai_followup_action") {
+		if r.aiClient != nil && r.fullSlackClient != nil {
+			threadTS := callback.Message.ThreadTimestamp
+			if threadTS == "" {
+				threadTS = callback.Message.Timestamp
+			}
+			go botslack.HandleAIFollowUp(
+				r.fullSlackClient,
+				r.aiClient,
+				callback.User.ID,
+				callback.Channel.ID,
+				threadTS,
+				action.Value,
+			)
+		}
+		return nil
+	}
+
+	// Handle AI "▶ Run" command buttons (action_id "ai_run_command_<n>"): execute
+	// the command carried in the button value as if the clicking user typed it.
+	if strings.HasPrefix(action.ActionID, "ai_run_command") {
+		if r.fullSlackClient != nil && r.jobManager != nil {
+			threadTS := callback.Message.ThreadTimestamp
+			if threadTS == "" {
+				threadTS = callback.Message.Timestamp
+			}
+			go botslack.RunCommandFromButton(
+				r.fullSlackClient,
+				r.jobManager,
+				r.commands,
+				callback.User.ID,
+				callback.Channel.ID,
+				threadTS,
 				action.Value,
 			)
 		}

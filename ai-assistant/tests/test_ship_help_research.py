@@ -61,13 +61,15 @@ def _install_fakes(monkeypatch, *, result=None, call_exc=None, connect_exc=None)
 
 
 def _configure(monkeypatch):
-    monkeypatch.setattr(shr, "_MCP_URL", "http://localhost:8091/mcp")
-    monkeypatch.setattr(shr, "_MCP_TOKEN", "test-token")
+    monkeypatch.setenv("SHIP_HELP_MCP_URL", "http://localhost:8091/mcp")
+    monkeypatch.setenv("SHIP_HELP_MCP_TOKEN", "test-token")
+    monkeypatch.delenv("SHIP_HELP_MCP_TOKEN_FILE", raising=False)
 
 
 async def test_returns_unavailable_when_not_configured(monkeypatch):
-    monkeypatch.setattr(shr, "_MCP_URL", "")
-    monkeypatch.setattr(shr, "_MCP_TOKEN", "")
+    monkeypatch.delenv("SHIP_HELP_MCP_URL", raising=False)
+    monkeypatch.delenv("SHIP_HELP_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SHIP_HELP_MCP_TOKEN_FILE", raising=False)
     out = await shr.researcher("how do I launch gcp?")
     assert out["error"] == "research_unavailable"
 
@@ -114,3 +116,29 @@ async def test_timeout_degrades(monkeypatch):
     _install_fakes(monkeypatch, call_exc=TimeoutError())
     out = await shr.researcher("q")
     assert out["error"] == "research_unavailable"
+
+
+async def test_auth_failure_text_degrades(monkeypatch):
+    # ship-help-bot returns some auth failures as plain text with isError unset;
+    # the client must still detect them and degrade instead of relaying as findings.
+    _configure(monkeypatch)
+    _install_fakes(
+        monkeypatch,
+        result=_Result(text="Authentication failed: This token has been revoked."),
+    )
+    out = await shr.researcher("why did my job fail?")
+    assert out["error"] == "research_error"
+    assert "revoked" in out["message"].lower()
+
+
+async def test_token_read_from_file(monkeypatch, tmp_path):
+    # With SHIP_HELP_MCP_TOKEN unset, the token is read fresh from the file so a
+    # re-minted token is picked up without restarting the service.
+    token_file = tmp_path / "cb.jwt"
+    token_file.write_text("file-token\n")
+    monkeypatch.setenv("SHIP_HELP_MCP_URL", "http://localhost:8091/mcp")
+    monkeypatch.delenv("SHIP_HELP_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("SHIP_HELP_MCP_TOKEN_FILE", str(token_file))
+    _install_fakes(monkeypatch, result=_Result(text="ok"))
+    out = await shr.researcher("q")
+    assert out == {"findings": "ok"}  # non-empty findings ⇒ token was read from file

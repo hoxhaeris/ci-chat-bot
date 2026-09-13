@@ -50,10 +50,27 @@ type AskRequest struct {
 	ChannelID string `json:"channel_id,omitempty"`
 }
 
+// AIButton is a follow-up quick-action button proposed by the AI assistant.
+// The Go bot renders it as a Slack button; clicking it re-asks with Message.
+type AIButton struct {
+	Label   string `json:"label"`
+	Message string `json:"message"`
+	Style   string `json:"style,omitempty"`
+}
+
+// AICommand is a validated cluster-bot command the AI assistant offers as a
+// one-click "▶ Run" button; clicking it executes Command as if the user typed it.
+type AICommand struct {
+	Label   string `json:"label,omitempty"`
+	Command string `json:"command"`
+}
+
 // AskResponse is the response body from the AI service /ask endpoint.
 type AskResponse struct {
-	Answer    string `json:"answer"`
-	RequestID string `json:"request_id,omitempty"`
+	Answer    string      `json:"answer"`
+	Buttons   []AIButton  `json:"buttons,omitempty"`
+	Commands  []AICommand `json:"commands,omitempty"`
+	RequestID string      `json:"request_id,omitempty"`
 }
 
 // NewAIClient creates a new AI assistant HTTP client.
