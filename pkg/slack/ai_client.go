@@ -2,8 +2,8 @@ package slack
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/openshift/ci-chat-bot/pkg/slack/parser"
 	"github.com/slack-go/slack/slackevents"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 )
 
@@ -24,6 +23,13 @@ const (
 	// maxConcurrentAIRequests limits the number of simultaneous AI service calls
 	// to prevent resource exhaustion if users send many messages while the service is slow.
 	maxConcurrentAIRequests = 10
+	// askTimeout bounds a single /ask call. The research path (ship-help-bot
+	// persona + oversight) is ~150s typical but can exceed 200s with oversight
+	// retries; this is the outer bound, above the researcher's own
+	// SHIP_HELP_MCP_TIMEOUT default (~300s).
+	askTimeout = 360 * time.Second
+	// healthCheckTimeout bounds the liveness probe.
+	healthCheckTimeout = 10 * time.Second
 )
 
 // AIClient is an HTTP client for the AI assistant service.
@@ -77,11 +83,12 @@ type AskResponse struct {
 func NewAIClient(serviceURL string) *AIClient {
 	c := &AIClient{
 		serviceURL: serviceURL,
-		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
-		},
-		aiThreads: make(map[string]time.Time),
-		sem:       make(chan struct{}, maxConcurrentAIRequests),
+		// No client-level timeout: per-request context deadlines bound each call
+		// (askTimeout / healthCheckTimeout). A fixed 120s client timeout would cut
+		// off the research path, which can legitimately run longer.
+		httpClient: &http.Client{},
+		aiThreads:  make(map[string]time.Time),
+		sem:        make(chan struct{}, maxConcurrentAIRequests),
 	}
 	go c.cleanupOldThreads()
 	return c
@@ -123,89 +130,62 @@ func (c *AIClient) cleanupOldThreads() {
 	}
 }
 
-// retryBackoff is the exponential backoff configuration for AI service requests.
-var retryBackoff = wait.Backoff{
-	Steps:    3,
-	Duration: 1 * time.Second,
-	Factor:   2.0,
-	Jitter:   0.1,
-}
-
-// isRetryableError returns true if the HTTP status code indicates a transient error
-// worth retrying (5xx server errors). Client errors (4xx) are not retried.
-func isRetryableStatusCode(statusCode int) bool {
-	return statusCode >= 500
-}
-
 // Ask sends a question to the AI assistant and returns the answer.
-// Retries on transient failures (connection errors, 5xx) with exponential backoff.
+//
+// Only a single attempt is made: the research path is expensive (it can run
+// well over a minute), so retrying would risk duplicate heavy work. The call is
+// bounded by askTimeout via a per-request context.
 func (c *AIClient) Ask(req AskRequest) (*AskResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	var lastErr error
-	var askResp AskResponse
+	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+	defer cancel()
 
-	err = wait.ExponentialBackoff(retryBackoff, func() (bool, error) {
-		url := fmt.Sprintf("%s/ask", c.serviceURL)
-		httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
-		if err != nil {
-			return false, fmt.Errorf("failed to create request: %w", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			// Connection error — retryable
-			lastErr = fmt.Errorf("failed to call AI service: %w", err)
-			klog.V(2).Infof("AI service request failed (will retry): %v", lastErr)
-			return false, nil
-		}
-		defer resp.Body.Close()
-
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to read response: %w", err)
-			return false, nil
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			if resp.StatusCode == http.StatusTooManyRequests {
-				// Rate limited — do not retry
-				return false, fmt.Errorf("AI service is rate limited, please try again later")
-			}
-			lastErr = fmt.Errorf("AI service returned status %d: %s", resp.StatusCode, string(respBody))
-			if isRetryableStatusCode(resp.StatusCode) {
-				klog.V(2).Infof("AI service returned %d (will retry): %s", resp.StatusCode, string(respBody))
-				return false, nil
-			}
-			// 4xx — do not retry
-			return false, lastErr
-		}
-
-		if err := json.Unmarshal(respBody, &askResp); err != nil {
-			return false, fmt.Errorf("failed to parse AI response: %w", err)
-		}
-
-		return true, nil
-	})
-
+	url := fmt.Sprintf("%s/ask", c.serviceURL)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		if errors.Is(err, wait.ErrWaitTimeout) && lastErr != nil {
-			return nil, fmt.Errorf("AI service request failed after retries: %w", lastErr)
-		}
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call AI service: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("AI service is rate limited, please try again later")
+		}
+		return nil, fmt.Errorf("AI service returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var askResp AskResponse
+	if err := json.Unmarshal(respBody, &askResp); err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
 	return &askResp, nil
 }
 
 // HealthCheck checks if the AI service is healthy.
 func (c *AIClient) HealthCheck() error {
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+	defer cancel()
 	url := fmt.Sprintf("%s/health/live", c.serviceURL)
-	resp, err := c.httpClient.Get(url)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create health check request: %w", err)
+	}
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("AI service health check failed: %w", err)
 	}

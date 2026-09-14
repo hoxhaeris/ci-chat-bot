@@ -1,8 +1,11 @@
 package slack
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/openshift/ci-chat-bot/pkg/manager"
 	"github.com/openshift/ci-chat-bot/pkg/slack/parser"
@@ -222,12 +225,13 @@ func insideLink(s string, i int) bool {
 	return lastOpen > strings.LastIndex(s[:i], ">")
 }
 
-// PostAISyncResponse posts a "thinking" message, sends the question via synchronous
-// Ask(), and updates the message with the response. Returns the final answer text.
+// PostAISyncResponse posts a placeholder message, sends the question to the AI
+// service, animates a "still working" ticker on the placeholder while the call
+// runs, then replaces it with the final answer. Returns the final answer text.
 func PostAISyncResponse(client parser.SlackClient, aiClient *AIClient, channel, threadTS string, req AskRequest) string {
-	// Post a visible status message so the user knows we're working
+	// Post a placeholder we animate while working, then replace with the answer.
 	_, thinkingTS, err := client.PostMessage(channel,
-		slack.MsgOptionText("_Processing your question..._", false),
+		slack.MsgOptionText(thinkingFrame(0, 0), false),
 		slack.MsgOptionTS(threadTS),
 	)
 	if err != nil {
@@ -236,10 +240,19 @@ func PostAISyncResponse(client parser.SlackClient, aiClient *AIClient, channel, 
 		thinkingTS = ""
 	}
 
+	// Reassure the user we're still working while the (blocking) call runs.
+	var stopTicker func()
+	if thinkingTS != "" {
+		stopTicker = startThinkingTicker(client, channel, thinkingTS)
+	}
+
 	resp, syncErr := aiClient.Ask(req)
+	if stopTicker != nil {
+		stopTicker()
+	}
 	if syncErr != nil {
 		klog.Errorf("AI service error: %v", syncErr)
-		errMsg := "I encountered an error processing your question. Please try again or use `help` for documentation."
+		errMsg := aiErrorMessage(syncErr)
 		if thinkingTS != "" {
 			_, _, _, _ = client.UpdateMessage(channel, thinkingTS,
 				slack.MsgOptionText(errMsg, false),
@@ -266,6 +279,84 @@ func PostAISyncResponse(client parser.SlackClient, aiClient *AIClient, channel, 
 		}
 	}
 	return resp.Answer
+}
+
+// thinkingSpinner animates a small glyph so the placeholder visibly "moves"
+// while we wait, mirroring ship-help-bot's progress feel.
+var thinkingSpinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// thinkingFrame renders one animation frame: a spinner glyph plus an escalating
+// reassurance line chosen by how long we've been waiting.
+func thinkingFrame(frame int, elapsed time.Duration) string {
+	spin := thinkingSpinner[frame%len(thinkingSpinner)]
+	return fmt.Sprintf("%s  _%s_", spin, thinkingMessage(elapsed))
+}
+
+// thinkingMessage returns an escalating reassurance line, so a long research
+// call reads as "still working" rather than "stuck".
+func thinkingMessage(elapsed time.Duration) string {
+	switch s := elapsed.Seconds(); {
+	case s < 15:
+		return "Thinking…"
+	case s < 35:
+		return "Researching your question…"
+	case s < 70:
+		return "Still working — digging through the CI knowledge base…"
+	case s < 120:
+		return "Still here — cross-checking Jira, Slack history, and docs…"
+	case s < 200:
+		return "Still on it — the research analysis is taking a while, hang tight…"
+	default:
+		return "Almost there — finalizing and fact-checking the response…"
+	}
+}
+
+// aiErrorMessage maps a failed AI call to a clear, user-facing explanation.
+// A timeout is called out specifically: the deep-research step can outlast the
+// request budget, and "try again / narrow it" is the useful next step.
+func aiErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "⏳ This one's taking longer than I can wait on here — the deep-research step didn't finish in time. Please try again (a more specific question often helps). If it keeps timing out, let us know in `#forum-ocp-crt`."
+	case strings.Contains(err.Error(), "rate limited"):
+		return "🚦 The AI assistant is busy right now (rate limited). Please try again in a moment."
+	default:
+		return "⚠️ I couldn't reach the AI assistant to finish your question. Please try again shortly — if it keeps failing, ask in `#forum-ocp-crt`."
+	}
+}
+
+// startThinkingTicker animates the placeholder message with escalating
+// reassurance while a blocking AI call runs. It returns a stop function that
+// halts the animation and waits for the ticker goroutine to finish, so the
+// final answer render can't race a late "thinking" update.
+func startThinkingTicker(client parser.SlackClient, channel, messageTS string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		const interval = 5 * time.Second
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		start := time.Now()
+		frame := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				frame++
+				if _, _, _, err := client.UpdateMessage(channel, messageTS,
+					slack.MsgOptionText(thinkingFrame(frame, time.Since(start)), false),
+				); err != nil {
+					klog.V(2).Infof("Failed to animate AI thinking message: %v", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 // HandleAskAI handles the "ask" command by forwarding the question to the AI service

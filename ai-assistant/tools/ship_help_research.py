@@ -15,8 +15,10 @@ Configuration (all via environment):
       on each call (used when SHIP_HELP_MCP_TOKEN is unset). Lets a re-minted
       token — minting a new one revokes the previous — be picked up without
       restarting this service.
-- ``SHIP_HELP_MCP_TIMEOUT``          Overall per-call ceiling, seconds (default 110,
-      kept under the Go AIClient's 120s request timeout).
+- ``SHIP_HELP_MCP_TIMEOUT``          Overall per-call ceiling, seconds (default 300,
+      kept under the Go AIClient's 360s request timeout so the persona's full run
+      — research + oversight, which can exceed 200s with oversight retries —
+      completes).
 - ``SHIP_HELP_MCP_CONNECT_TIMEOUT``  Connect/handshake timeout, seconds (default 30).
 
 If the endpoint or token is unset, or the call fails/times out, the tool
@@ -45,7 +47,7 @@ def _read_float_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-_TOTAL_TIMEOUT = _read_float_env("SHIP_HELP_MCP_TIMEOUT", 110.0)
+_TOTAL_TIMEOUT = _read_float_env("SHIP_HELP_MCP_TIMEOUT", 300.0)
 _CONNECT_TIMEOUT = _read_float_env("SHIP_HELP_MCP_CONNECT_TIMEOUT", 30.0)
 
 # Soft-failure payload: keeps the agent working (it falls back to local tools
