@@ -172,6 +172,7 @@ type Metadata struct {
 	TotalEmployees          int               `json:"total_employees"`
 	TotalOrgs               int               `json:"total_orgs"`
 	TotalTeams              int               `json:"total_teams"`
+	PIIFree                 bool              `json:"pii_free,omitempty"`
 	ContextTypeDescriptions map[string]string `json:"context_type_descriptions,omitempty"`
 }
 

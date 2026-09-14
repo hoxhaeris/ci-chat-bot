@@ -19,10 +19,12 @@ import (
 	"github.com/adrg/xdg"
 	orgdatacore "github.com/openshift-eng/cyborg-data/go"
 	"github.com/openshift/ci-chat-bot/pkg/manager"
+	chatmetrics "github.com/openshift/ci-chat-bot/pkg/metrics"
 	"github.com/openshift/ci-chat-bot/pkg/slack"
 	"github.com/openshift/ci-chat-bot/pkg/utils"
 	botversion "github.com/openshift/ci-chat-bot/pkg/version"
 	"github.com/openshift/rosa/pkg/rosa"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"sigs.k8s.io/prow/pkg/config/secret"
 	"sigs.k8s.io/prow/pkg/flagutil"
@@ -93,8 +95,6 @@ type options struct {
 	// AI service configuration
 	aiServiceURL    string
 	internalAPIPort int
-
-	jiraOptions flagutil.JiraOptions
 }
 
 func (o *options) Validate() error {
@@ -156,14 +156,25 @@ func run() error {
 	pflag.StringVar(&opt.aiServiceURL, "ai-service-url", "", "URL of the AI assistant service (e.g., http://localhost:3000). If empty, AI features are disabled.")
 	pflag.IntVar(&opt.internalAPIPort, "internal-api-port", 8082, "Port for the internal API server (bound to 127.0.0.1 only). Used by the AI assistant service.")
 
+	// Deprecated: Jira integration has been removed. These flags are kept
+	// for backward compatibility with existing deployment configurations.
+	var deprecatedJiraEndpoint, deprecatedJiraUsername, deprecatedJiraPasswordFile string
+	pflag.StringVar(&deprecatedJiraEndpoint, "jira-endpoint", "", "Deprecated: Jira integration has been removed")
+	pflag.StringVar(&deprecatedJiraUsername, "jira-username", "", "Deprecated: Jira integration has been removed")
+	pflag.StringVar(&deprecatedJiraPasswordFile, "jira-password-file", "", "Deprecated: Jira integration has been removed")
+
 	opt.prowconfig.AddFlags(emptyFlags)
 	opt.GitHubOptions.AddFlags(emptyFlags)
 	opt.KubernetesOptions.AddFlags(emptyFlags)
 	opt.InstrumentationOptions.AddFlags(emptyFlags)
-	opt.jiraOptions.AddFlags(emptyFlags)
 	pflag.CommandLine.AddGoFlagSet(emptyFlags)
 	pflag.Parse()
 	klog.SetOutput(os.Stderr)
+
+	if deprecatedJiraEndpoint != "" || deprecatedJiraUsername != "" || deprecatedJiraPasswordFile != "" {
+		klog.Warning("Jira flags (--jira-endpoint, --jira-username, --jira-password-file) are deprecated and will be removed in a future release. Jira integration has been removed.")
+	}
+
 	// let k8s know that we're alive
 	health := pjutil.NewHealthOnPort(opt.InstrumentationOptions.HealthPort)
 
@@ -174,6 +185,11 @@ func run() error {
 
 	if err := opt.Validate(); err != nil {
 		return fmt.Errorf("unable to validate program arguments: %w", err)
+	}
+
+	commandUsageMetrics, err := chatmetrics.New(prometheus.DefaultRegisterer)
+	if err != nil {
+		return fmt.Errorf("unable to initialize command usage metrics: %w", err)
 	}
 
 	if opt.overrideLaunchLabel != "" {
@@ -425,16 +441,10 @@ func run() error {
 	}
 
 	bot := slack.NewBot(botToken, botSigningSecret, opt.GracePeriod, opt.Port, &workflows, opt.aiServiceURL)
-	jiraclient, err := opt.jiraOptions.Client()
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	if err != nil {
-		klog.Errorf("failed to load the Jira Client: %s", err)
-		Start(bot, nil, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics, opt.internalAPIPort)
-	} else {
-		Start(bot, jiraclient.JiraClient(), jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics, opt.internalAPIPort)
-	}
+	Start(bot, jobManager, httpClient, health, opt.InstrumentationOptions, clusterBotMetrics, opt.internalAPIPort, commandUsageMetrics)
 
-	return err
+	return nil
 }
 
 func processKubeConfigs(kubeConfigs map[string]rest.Config) (utils.BuildClusterClientConfigMap, error) {

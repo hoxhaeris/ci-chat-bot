@@ -45,14 +45,14 @@ func MakeSimpleProcessHandler(
 ) func(*slack.Client, manager.JobManager) interactions.Handler {
 	return func(updater *slack.Client, jobManager manager.JobManager) interactions.Handler {
 		return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-			go func() {
+			SafeGo(func() {
 				msg, err := actionFunc(jobManager, callback)
 				if err != nil {
 					modals.OverwriteView(updater, modals.ErrorView(errorContext, err), callback, logger)
 					return
 				}
 				modals.OverwriteView(updater, modals.SubmissionView(title, msg), callback, logger)
-			}()
+			})
 			return modals.SubmitPrepare(title, identifier, logger)
 		})
 	}
@@ -87,11 +87,9 @@ func AppendKubeconfigBlock(view *slack.ModalViewRequest, kubeconfig, headerText 
 		slack.NewDividerBlock(),
 		slack.NewHeaderBlock(slack.NewTextBlockObject(slack.PlainTextType, headerText, true, false)),
 		slack.NewRichTextBlock("kubeconfig", &slack.RichTextPreformatted{
-			RichTextSection: slack.RichTextSection{
-				Type: slack.RTEPreformatted,
-				Elements: []slack.RichTextSectionElement{
-					slack.NewRichTextSectionTextElement(kubeconfig, &slack.RichTextSectionTextStyle{Code: false}),
-				},
+			Type: slack.RTEPreformatted,
+			Elements: []slack.RichTextSectionElement{
+				slack.NewRichTextSectionTextElement(kubeconfig, &slack.RichTextSectionTextStyle{Code: false}),
 			},
 		}))
 }

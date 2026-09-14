@@ -581,8 +581,10 @@ func (s *Service) computeHierarchyPath(entityName, entityType string) []Hierarch
 	}
 
 	path := []HierarchyPathEntry{{Name: entityName, Type: entityType}}
-	visited := make(map[string]bool)
-	visited[entityName] = true
+	// Guard against cycles by tracking visited entities by both name and type.
+	// Different entity types can share a name (e.g. a team and its parent
+	// team_group), so keying on name alone would stop the walk prematurely.
+	visited := map[HierarchyPathEntry]bool{{Name: entityName, Type: entityType}: true}
 
 	currentName := entityName
 	currentType := entityType
@@ -592,11 +594,12 @@ func (s *Service) computeHierarchyPath(entityName, entityType string) []Hierarch
 		if parent == nil {
 			break
 		}
-		if visited[parent.Name] {
+		parentEntry := HierarchyPathEntry{Name: parent.Name, Type: parent.Type}
+		if visited[parentEntry] {
 			break
 		}
-		visited[parent.Name] = true
-		path = append(path, HierarchyPathEntry{Name: parent.Name, Type: parent.Type})
+		visited[parentEntry] = true
+		path = append(path, parentEntry)
 		currentName = parent.Name
 		currentType = parent.Type
 	}
@@ -1208,6 +1211,15 @@ func (s *Service) GetContextTypeDescriptions() map[string]string {
 
 // validateData checks that required data structures are present.
 func validateData(data *Data) error {
+	if data.Metadata.PIIFree {
+		if len(data.Lookups.Employees) > 0 {
+			return fmt.Errorf("%w: pii_free is set but lookups.employees is not empty", ErrInvalidData)
+		}
+		if len(data.Indexes.Membership.MembershipIndex) > 0 {
+			return fmt.Errorf("%w: pii_free is set but membership_index is not empty", ErrInvalidData)
+		}
+		return nil
+	}
 	if len(data.Lookups.Employees) == 0 {
 		return fmt.Errorf("%w: missing lookups.employees", ErrInvalidData)
 	}

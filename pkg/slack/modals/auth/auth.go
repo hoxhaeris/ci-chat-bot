@@ -22,7 +22,7 @@ func Register(client *slack.Client, jobmanager manager.JobManager) *modals.FlowW
 // process has custom kubeconfig handling logic
 func process(updater *slack.Client, jobManager manager.JobManager) interactions.Handler {
 	return interactions.HandlerFunc(identifier, func(callback *slack.InteractionCallback, logger *logrus.Entry) (output []byte, err error) {
-		go func() {
+		common.SafeGo(func() {
 			job, err := jobManager.GetLaunchJob(callback.User.ID)
 			if err != nil {
 				modals.OverwriteView(updater, modals.ErrorView("getting launch job", err), callback, logger)
@@ -32,7 +32,7 @@ func process(updater *slack.Client, jobManager manager.JobManager) interactions.
 			submission := modals.SubmissionView(title, msg)
 			common.AppendKubeconfigBlock(&submission, kubeconfig, "KubeConfig File (to download the kubeconfig as a file, type `auth` in the Messages tab):")
 			modals.OverwriteView(updater, submission, callback, logger)
-		}()
+		})
 		return modals.SubmitPrepare(title, identifier, logger)
 	})
 }

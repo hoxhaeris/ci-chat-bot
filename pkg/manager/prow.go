@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +25,6 @@ import (
 	"github.com/openshift/ci-chat-bot/pkg/utils"
 
 	"k8s.io/klog"
-	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/yaml"
 
 	corev1 "k8s.io/api/core/v1"
@@ -180,6 +180,15 @@ var (
 	// reVersion detects whether a version appears to correlate to a major.minor release
 	reVersion = regexp.MustCompile(`^(\d+\.\d+)`)
 )
+
+func jobHasRefs(job *Job) bool {
+	for _, input := range job.Inputs {
+		if len(input.Refs) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 func mceReleaseName(job *Job) string {
 	if len(job.Inputs) == 0 {
@@ -594,21 +603,11 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 		}
 	}
 
-	// if a step based config, launch should now be the test config we will run; time to update the config for lease balancing
-	if job.UseSecondaryAccount {
-		switch job.Platform {
-		case "aws":
-			if err := convertAWSToAWS2(pj, sourceConfig); err != nil {
-				return "", fmt.Errorf("failed updating aws job to aws-2: %w", err)
-			}
-		case "gcp":
-			if err := convertGCPToGCP2(pj, sourceConfig); err != nil {
-				return "", fmt.Errorf("failed updating gcp job to gcp-openshift-gce-devel-ci-2: %w", err)
-			}
-		case "azure":
-			if err := convertAzureToAzure2(pj, sourceConfig); err != nil {
-				return "", fmt.Errorf("failed updating azure job to azure-2: %w", err)
-			}
+	// if a cluster-profile set was selected, apply it so Test Platform picks
+	// and balances the underlying account at runtime
+	if job.CloudProfileSet != "" {
+		if err := applyClusterProfile(pj, sourceConfig, job.CloudProfileSet); err != nil {
+			return "", fmt.Errorf("failed applying cluster profile %q: %w", job.CloudProfileSet, err)
 		}
 	}
 
@@ -643,12 +642,7 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 	}
 	sourceConfig.ReleaseTagConfiguration = nil
 
-	var hasRefs bool
-	for _, input := range job.Inputs {
-		if len(input.Refs) > 0 {
-			hasRefs = true
-		}
-	}
+	hasRefs := jobHasRefs(job)
 	var mceReleaseVersion string
 	if job.Mode == JobTypeMCECustomImage {
 		mceReleaseVersion = mceReleaseName(job)
@@ -672,7 +666,7 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("unable to lookup registry URL for job")
 		}
-		registryHost := strings.SplitN(is.Status.PublicDockerImageRepository, "/", 2)[0]
+		registryHost, _, _ := strings.Cut(is.Status.PublicDockerImageRepository, "/")
 
 		// NAMESPACE must be set for this job, and be in the first position, so remove it if set
 		prow.RemoveJobEnvVar(&pj.Spec, "NAMESPACE")
@@ -758,12 +752,35 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 					klog.Infof("Found target job config:\n%s", string(data))
 				}
 
-				newOperatorRepo, err := processOperatorPR(operatorRepo, sourceConfig, targetConfig, job, &ref, pj)
-				if err != nil {
-					return "", err
+				// The `build` command creates release images; it cannot build
+				// an operator catalog. If the PR targets an optional operator
+				// repository (one that declares operator bundles), mark the job
+				// as an operator job but do not attempt to process it as an
+				// operator job, as that will define test steps to run, which
+				// will fail. The LaunchJobForUser function will tell users to
+				// use `catalog build` for optional operators if they are
+				// running `build` on a repo with optional operators defined.
+				// Allowing `build` to run on repos that define optional
+				// operators allows repos that define both payload images and
+				// optional operators to test both their payload images and
+				// optional operators.
+				if job.Mode == JobTypeBuild {
+					if bundleName, ok := job.JobParams["bundle"]; ok {
+						return "", fmt.Errorf("the `bundle` parameter %q is not supported with `build`; use `catalog build` to build an operator catalog", bundleName)
+					}
+					if targetConfig.Operator != nil && len(targetConfig.Operator.Bundles) > 0 {
+						job.Operator.Is = true
+					}
 				}
-				if newOperatorRepo != "" {
-					operatorRepo = newOperatorRepo
+				var newOperatorRepo string
+				if job.Mode != JobTypeBuild {
+					newOperatorRepo, err = processOperatorPR(operatorRepo, sourceConfig, targetConfig, job, &ref, pj)
+					if err != nil {
+						return "", err
+					}
+					if newOperatorRepo != "" {
+						operatorRepo = newOperatorRepo
+					}
 				}
 
 				// delete sections we don't need
@@ -909,12 +926,14 @@ func (m *jobManager) newJob(job *Job) (string, error) {
 
 		var args []string
 		for _, arg := range container.Args {
-			if strings.HasPrefix(arg, "--namespace") {
+			if strings.HasPrefix(arg, "--namespace") || strings.HasPrefix(arg, "--delete-when-idle") || strings.HasPrefix(arg, "--delete-after") {
 				continue
 			}
 			args = append(args, arg)
 		}
-		args = append(args, `--namespace=$(NAMESPACE)`)
+		// Keep the namespace around for a week like build jobs; without these flags
+		// ci-operator defaults to a 1h soft TTL and the images disappear while the MCE cluster is still up.
+		args = append(args, `--namespace=$(NAMESPACE)`, `--delete-when-idle=$(PRESERVE_DURATION)`, `--delete-after=$(DELETE_AFTER)`)
 
 		envPrefix := strings.Join(restoreImageVariableScript, " ")
 		container.Command = []string{"/bin/bash", "-c"}
@@ -1220,6 +1239,9 @@ func (m *jobManager) waitForJob(job *Job) error {
 		setupContainerTimeout = 90 * time.Minute
 	} else if job.Operator.Is {
 		setupContainerTimeout = 105 * time.Minute
+	}
+	if jobHasRefs(job) {
+		setupContainerTimeout += 30 * time.Minute
 	}
 
 	if job.Mode != JobTypeLaunch && job.Mode != JobTypeWorkflowLaunch {
@@ -1790,18 +1812,13 @@ func (e *resolvedEnvironment) Lookup(name string) string {
 	return ""
 }
 
-func convertToAccount2(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuildConfiguration, profileName, profileSecret, accountDomain string) error {
+// applyClusterProfile points the job's `launch` test at the given cluster
+// profile (typically a profile set such as "openshift-org-gcp"). Only the
+// cloud-cluster-profile label and the launch test's ClusterProfile are set;
+// the per-account secret volume and BASE_DOMAIN are intentionally left alone,
+// as the runtime resolves those from the account the profile set selects.
+func applyClusterProfile(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuildConfiguration, profileName string) error {
 	job.Labels["ci-operator.openshift.io/cloud-cluster-profile"] = profileName
-	for index, volume := range job.Spec.PodSpec.Volumes {
-		// TODO: only some ci-chat-bot jobs have this; check if they can all be removed
-		if volume.Name == "cluster-profile" {
-			if volume.Projected == nil {
-				volume.Projected = &corev1.ProjectedVolumeSource{}
-			}
-			volume.Projected.Sources = []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: profileSecret}}}}
-			job.Spec.PodSpec.Volumes[index] = volume
-		}
-	}
 	var matchedTarget *citools.TestStepConfiguration
 	for _, test := range sourceConfig.Tests {
 		if test.As == "launch" {
@@ -1816,20 +1833,5 @@ func convertToAccount2(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuil
 		return fmt.Errorf("invalid job; `launch` test is not a multistage test")
 	}
 	matchedTarget.MultiStageTestConfiguration.ClusterProfile = citools.ClusterProfile(profileName)
-	if accountDomain != "" && matchedTarget.MultiStageTestConfiguration != nil && matchedTarget.MultiStageTestConfiguration.Environment != nil {
-		matchedTarget.MultiStageTestConfiguration.Environment["BASE_DOMAIN"] = accountDomain
-	}
 	return nil
-}
-
-func convertAWSToAWS2(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuildConfiguration) error {
-	return convertToAccount2(job, sourceConfig, "aws-2", "cluster-secrets-aws-2", "aws-2.ci.openshift.org")
-}
-
-func convertAzureToAzure2(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuildConfiguration) error {
-	return convertToAccount2(job, sourceConfig, "azure-2", "cluster-secrets-azure-2", "ci2.azure.devcluster.openshift.com")
-}
-
-func convertGCPToGCP2(job *prowapiv1.ProwJob, sourceConfig *citools.ReleaseBuildConfiguration) error {
-	return convertToAccount2(job, sourceConfig, "gcp-openshift-gce-devel-ci-2", "cluster-secrets-gcp-openshift-gce-devel-ci-2", "")
 }

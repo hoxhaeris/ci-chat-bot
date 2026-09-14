@@ -111,6 +111,17 @@ var HypershiftSupportedVersions = HypershiftSupportedVersionsType{}
 var reBranchVersion = regexp.MustCompile(`^(openshift-|release-)(\d+\.\d+)$`)
 var reMajorMinorVersion = regexp.MustCompile(`^(\d+)\.(\d+)$`)
 
+// platformProfileSets maps each cloud platform to its cluster-profile set.
+// A profile set (e.g. "openshift-org-gcp") is resolved by Test Platform at job
+// runtime, which randomly selects one of the underlying "regular" cluster
+// profiles. This delegates account dispersement to Test Platform rather than
+// ClusterBot querying Boskos and choosing an account itself. See OCPCRT-450.
+var platformProfileSets = map[string]string{
+	"aws":   "openshift-org-aws",
+	"azure": "openshift-org-azure",
+	"gcp":   "openshift-org-gcp",
+}
+
 func (j Job) IsComplete() bool {
 	return j.Complete || len(j.Credentials) > 0 || (len(j.State) > 0 && j.State != prowapiv1.PendingState)
 }
@@ -1251,6 +1262,9 @@ func buildPullSpec(namespace, tagName, isName string) string {
 }
 
 func pullSpecForTagRef(tag *imagev1.TagReference, namespace, isName string) string {
+	if tag == nil {
+		return ""
+	}
 	if tag.Reference && tag.From != nil && tag.From.Kind == "DockerImage" && tag.From.Name != "" {
 		return tag.From.Name
 	}
@@ -1293,6 +1307,8 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "origin", Imagestream: "release"})
 		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "origin", Imagestream: "release-scos"})
 		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "origin", Imagestream: "release-scos-next"})
+		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "origin", Imagestream: "release-5-scos"})
+		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "origin", Imagestream: "release-5-scos-next"})
 	case "arm64":
 		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "ocp-arm64", Imagestream: "release-arm64", ArchSuffix: "-arm64"})
 		imagestreams = append(imagestreams, namespaceAndStream{Namespace: "ocp-arm64", Imagestream: "release-5-arm64", ArchSuffix: "-arm64"})
@@ -1342,6 +1358,9 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					runSpec = installSpec
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.nightly", unresolved))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.nightly release is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1354,6 +1373,9 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					runSpec = installSpec
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.ci", unresolved))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.ci release is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1365,7 +1387,12 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 				if architecture == "amd64" || architecture == "multi" {
 					runSpec = installSpec
 				} else {
-					runTag := findNewestImageSpecTagWithStream(amd64IS, unresolved)
+					// stable releases are named "<major>-stable" rather than the bare major.minor,
+					// so resolve the amd64 companion the same way we resolved the arch-specific tag above
+					runTag := findNewestStableImageSpecTagBySemanticMajor(amd64IS, unresolved, "amd64")
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no amd64 stable release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 				return installSpec, tag.Name, runSpec, nil
@@ -1382,9 +1409,16 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 		}
 
 		if tag, name := findImageStatusTag(is, unresolved); tag != nil {
-			klog.Infof("Resolved %s to image %s", imageOrVersion, tag.Image)
+			// CI releases are now all references to QCI, which means they don't have a value for the "Image" field
+			var installSpec string
+			if len(tag.Image) == 0 {
+				installSpec = tag.DockerImageReference
+				klog.Infof("Resolved %s to QCI image %s", imageOrVersion, installSpec)
+			} else {
+				klog.Infof("Resolved %s to image %q", imageOrVersion, tag.Image)
+				installSpec = buildPullSpec(ns, tag.Image, isName)
+			}
 			// identify nightly stream for runspec if not amd64
-			installSpec := buildPullSpec(ns, tag.Image, isName)
 			runSpec := ""
 			if architecture == "amd64" || architecture == "multi" || strings.Contains(unresolved, "konflux") {
 				runSpec = installSpec
@@ -1397,10 +1431,22 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Image, err)
 					}
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				} else {
 					runTag, _ := findImageStatusTag(amd64IS, unresolved)
-					runSpec = buildPullSpec("ocp", runTag.Image, "release")
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
+					// QCI-backed releases have an empty Image field; fall back to the
+					// DockerImageReference so we don't build a trailing-colon pullspec.
+					if len(runTag.Image) == 0 {
+						runSpec = runTag.DockerImageReference
+					} else {
+						runSpec = buildPullSpec("ocp", runTag.Image, "release")
+					}
 				}
 			}
 			return installSpec, name, runSpec, nil
@@ -1422,9 +1468,15 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Name, err)
 					}
 					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				} else {
 					runTag := findNewestImageSpecTagWithStream(amd64IS, unresolved)
+					if runTag == nil {
+						return "", "", "", fmt.Errorf("no accepted amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
+					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				}
 			}
@@ -1438,11 +1490,13 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 			if architecture == "amd64" || architecture == "multi" {
 				runSpec = installSpec
 			} else {
-				if runTag := findSpecTagByName(amd64IS, unresolved); runTag != nil {
-					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
-				} else {
-					runSpec = installSpec
+				runTag := findSpecTagByName(amd64IS, unresolved)
+				if runTag == nil {
+					// the arm64 installSpec cannot run the job on the amd64 build
+					// farm, so error out rather than reusing it as the runner image
+					return "", "", "", fmt.Errorf("no amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
 				}
+				runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 			}
 			return installSpec, tag.Name, runSpec, nil
 		}
@@ -1705,6 +1759,14 @@ func (m *jobManager) resolveToJob(req *JobRequest) (*Job, error) {
 
 	if len(req.Type) == 0 {
 		req.Type = JobTypeBuild
+	}
+	if req.Type == JobTypeBuild {
+		if bundleName, ok := req.JobParams["bundle"]; ok {
+			if bundleName == "" {
+				return nil, fmt.Errorf("the `bundle` parameter is not supported with `build`; use `catalog build` to build an operator catalog")
+			}
+			return nil, fmt.Errorf("the `bundle` parameter %q is not supported with `build`; use `catalog build` to build an operator catalog", bundleName)
+		}
 	}
 
 	req.RequestedAt = time.Now()
@@ -2049,7 +2111,7 @@ var validVersionRegexes = []*regexp.Regexp{
 	// OKD versions
 	// quay.io/okd/scos-release:4.19.0-okd-scos.ec.8
 	regexp.MustCompile(`^quay\.io/okd/scos-release:\d+\.\d+\.\d+-okd-scos\.ec\.\d+$`),
-	regexp.MustCompile(`^(quay\.io/okd|quay\.io/openshift/okd|registry\.ci\.openshift\.org/origin/release-scos):\d+\.\d+\.\d+-0\.okd(-scos)?(\.ec\.\d+)?(-\d{4}-\d{2}-\d{2}-\d{6})?$`),
+	regexp.MustCompile(`^(quay\.io/okd|quay\.io/openshift/okd|registry\.ci\.openshift\.org/origin/release(-5)?-scos(-next)?):\d+\.\d+\.\d+-0\.okd(-scos)?(\.ec\.\d+)?(-\d{4}-\d{2}-\d{2}-\d{6})?$`),
 
 	// Private releases
 	regexp.MustCompile(`^registry\.ci\.openshift\.org/ocp-priv/release-priv:\d+\.\d+\.\d+-0\.nightly-priv-\d{4}-\d{2}-\d{2}-\d{6}`),
@@ -2173,46 +2235,11 @@ func (m *jobManager) LaunchJobForUser(req *JobRequest) (string, error) {
 
 	klog.Infof("Job %q requested by user %q with mode %s prow job %s(%s) - params=%s, inputs=%#v", job.Name, req.User, job.Mode, job.JobName, job.BuildCluster, paramsToString(job.JobParams), job.Inputs)
 
-	// check what leases are available for platform
-	if req.Architecture == "amd64" && m.lClient != nil {
-		switch req.Platform {
-		case "aws":
-			metrics1, err := m.lClient.Metrics("aws-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `aws` leases: %v", err)
-			}
-			metrics2, err := m.lClient.Metrics("aws-2-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `aws-2` leases: %v", err)
-			}
-			if metrics2.Free > metrics1.Free {
-				job.UseSecondaryAccount = true
-			}
-		case "azure":
-			metrics1, err := m.lClient.Metrics("azure4-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `azure` leases: %v", err)
-			}
-			metrics2, err := m.lClient.Metrics("azure-2-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `azure-2` leases: %v", err)
-			}
-			if metrics2.Free > metrics1.Free {
-				job.UseSecondaryAccount = true
-			}
-		case "gcp":
-			metrics1, err := m.lClient.Metrics("gcp-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `gcp` leases: %v", err)
-			}
-			metrics2, err := m.lClient.Metrics("gcp-openshift-gce-devel-ci-2-quota-slice")
-			if err != nil {
-				return "", fmt.Errorf("failed to get metrics for `gcp-openshift-gce-devel-ci-2` leases: %v", err)
-			}
-			if metrics2.Free > metrics1.Free {
-				job.UseSecondaryAccount = true
-			}
-		}
+	// Delegate account dispersement to Test Platform via the platform's
+	// cluster-profile set, which randomly selects an underlying account at
+	// runtime. Non-amd64 launches keep the default per-platform profile.
+	if req.Architecture == "amd64" {
+		job.CloudProfileSet = platformProfileSets[req.Platform]
 	}
 
 	msg, err := func() (string, error) {
@@ -2320,6 +2347,9 @@ func (m *jobManager) LaunchJobForUser(req *JobRequest) (string, error) {
 		msg = fmt.Sprintf("%s multiple worker nodes, please end abort this launch with `done` and launch a cluster using another platform such as `aws` or `gcp`", msg)
 		msg = fmt.Sprintf("%s (e.g. `launch 4.19 aws`).\n\n", msg)
 	}
+	if job.Operator.Is && job.Mode == JobTypeBuild {
+		msg = fmt.Sprintf("%s\n\nNote: the `build` command creates release images; if you want to build an operator catalog to test the defined optional operators instead, use `catalog build`.\n\n", msg)
+	}
 
 	if job.Mode == JobTypeLaunch || job.Mode == JobTypeWorkflowLaunch {
 		msg = fmt.Sprintf("%sa <%s|cluster is being created>", msg, prowJobUrl)
@@ -2331,6 +2361,9 @@ func (m *jobManager) LaunchJobForUser(req *JobRequest) (string, error) {
 			msg = fmt.Sprintf("%s. I'll send you the credentials once both the cluster and the operator are ready", msg)
 		} else {
 			msg = fmt.Sprintf("%s - I'll send you the credentials when the cluster is ready.", msg)
+		}
+		if jobHasRefs(job) {
+			msg = fmt.Sprintf("%s\n\nNote: your launch includes custom PR builds, which typically add 20-40 minutes to launch time. Total estimated time is up to ~90 minutes.", msg)
 		}
 		return "", errors.New(msg)
 	}
@@ -2446,6 +2479,20 @@ func (m *jobManager) jobIsComplete(job *Job) bool {
 	return false
 }
 
+func (m *jobManager) prowJobIsStillRunning(name string) bool {
+	pj, err := m.prowClient.ProwJobs(m.prowNamespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		klog.Warningf("Unable to check ProwJob %q state: %v", name, err)
+		return false
+	}
+	switch pj.Status.State {
+	case prowapiv1.AbortedState, prowapiv1.ErrorState, prowapiv1.FailureState, prowapiv1.SuccessState:
+		return false
+	default:
+		return true
+	}
+}
+
 func (m *jobManager) handleJobStartup(job Job, source string) {
 	if !m.tryJob(job.Name) {
 		klog.Infof("Job %q already has a worker (%s)", job.Name, source)
@@ -2459,6 +2506,9 @@ func (m *jobManager) handleJobStartup(job Job, source string) {
 		} else {
 			if strings.HasPrefix(err.Error(), "timed out waiting for your prowjob") {
 				klog.Errorf("Job %q timed out waiting for prowjob to start (%s): %v", job.Name, source, err)
+			} else if strings.HasPrefix(err.Error(), "cluster never became available") && m.prowJobIsStillRunning(job.Name) {
+				klog.Warningf("Job %q monitoring window expired but prowjob is still running (%s): %v -- deferring to sync loop", job.Name, source, err)
+				return
 			} else {
 				klog.Errorf("Job %q failed to launch (%s): %v", job.Name, source, err)
 				job.Failure = err.Error()

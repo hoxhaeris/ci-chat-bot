@@ -3,14 +3,14 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	jiraClient "github.com/andygrunwald/go-jira"
-	"github.com/openshift/ci-chat-bot/pkg/jira"
 	"github.com/openshift/ci-chat-bot/pkg/manager"
+	chatmetrics "github.com/openshift/ci-chat-bot/pkg/metrics"
 	"github.com/openshift/ci-chat-bot/pkg/slack"
 	eventhandler "github.com/openshift/ci-chat-bot/pkg/slack/events"
 	eventrouter "github.com/openshift/ci-chat-bot/pkg/slack/events/router"
@@ -34,21 +34,11 @@ func l(fragment string, children ...simplifypath.Node) simplifypath.Node {
 	return simplifypath.L(fragment, children...)
 }
 
-func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.JobManager, httpclient *http.Client, health *pjutil.Health, iOpts prowflagutil.InstrumentationOptions, clusterBotMetrics *metrics.Metrics, internalAPIPort int) {
+func Start(bot *slack.Bot, jobManager manager.JobManager, httpclient *http.Client, health *pjutil.Health, iOpts prowflagutil.InstrumentationOptions, clusterBotMetrics *metrics.Metrics, internalAPIPort int, commandRecorders ...chatmetrics.CommandRecorder) {
 	slackclient := slackClient.New(bot.BotToken)
 	jobManager.SetNotifier(bot.JobResponder(slackclient))
 	jobManager.SetRosaNotifier(bot.RosaResponder(slackclient))
 	jobManager.SetMceNotifier(bot.MceResponder(slackclient))
-	var issueFiler jira.IssueFiler
-	if jiraclient != nil {
-		var err error
-		issueFiler, err = jira.NewIssueFiler(slackclient, jiraclient)
-		if err != nil {
-			klog.Errorf(" Could not initialize Jira issue filer: %s", err)
-		}
-	} else {
-		issueFiler = nil
-	}
 
 	metrics.ExposeMetrics("ci-chat-bot", config.PushGateway{}, iOpts.MetricsPort)
 	simplifier := simplifypath.NewSimplifier(l("", // shadow element mimicking the root
@@ -65,7 +55,7 @@ func Start(bot *slack.Bot, jiraclient *jiraClient.Client, jobManager manager.Job
 	mux := http.NewServeMux()
 	mux.Handle("/", handler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { writer.WriteHeader(http.StatusOK) })))
 	mux.Handle("/readyz", handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))) // report ready once the server is up and responding
-	mux.Handle("/slack/events-endpoint", handler(handleEvent(bot.BotSigningSecret, eventrouter.ForEvents(slackclient, jobManager, bot.SupportedCommands(), issueFiler, bot.AIClient))))
+	mux.Handle("/slack/events-endpoint", handler(handleEvent(bot.BotSigningSecret, eventrouter.ForEvents(slackclient, jobManager, bot.SupportedCommands(), bot.AIClient, commandRecorders...))))
 	mux.Handle("/slack/interactive-endpoint", handler(handleInteraction(bot.BotSigningSecret, interactionrouter.ForModals(slackclient, jobManager, httpclient, bot.AIClient, bot.SupportedCommands()))))
 	server := &http.Server{Addr: ":" + strconv.Itoa(bot.Port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	health.ServeReady(func() bool {
@@ -129,6 +119,11 @@ func handleEvent(signingSecret string, handler eventhandler.Handler) http.Handle
 		writer.WriteHeader(http.StatusOK)
 		// we don't really care how long this takes
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					klog.Errorf("Recovered from panic while handling event: %v\n%s", r, debug.Stack())
+				}
+			}()
 			if err := handler.Handle(&event, logger); err != nil {
 				klog.Errorf("Failed to handle event: %v", err)
 			}
@@ -151,6 +146,7 @@ func handleInteraction(signingSecret string, handler interactionhandler.Handler)
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+
 		logger.WithField("interaction", callback).Trace("Read an interaction payload.")
 		logger = logger.WithFields(fieldsFor(&callback))
 		response, err := handler.Handle(&callback, logger)

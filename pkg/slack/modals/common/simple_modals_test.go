@@ -149,6 +149,84 @@ func TestAppendKubeconfigBlock(t *testing.T) {
 	}
 }
 
+func TestAppendKubeconfigBlockJSON(t *testing.T) {
+	view := &slack.ModalViewRequest{
+		Blocks: slack.Blocks{BlockSet: []slack.Block{}},
+	}
+	AppendKubeconfigBlock(view, "apiVersion: v1\nclusters: []", "Kubeconfig")
+
+	data, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("failed to marshal view: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	blocks := parsed["blocks"].([]any)
+	richTextBlock := blocks[2].(map[string]any)
+	if richTextBlock["type"] != "rich_text" {
+		t.Errorf("rich text block type = %q, want %q", richTextBlock["type"], "rich_text")
+	}
+	elements := richTextBlock["elements"].([]any)
+	preformatted := elements[0].(map[string]any)
+	if preformatted["type"] != "rich_text_preformatted" {
+		t.Errorf("preformatted type = %q, want %q", preformatted["type"], "rich_text_preformatted")
+	}
+	innerElements := preformatted["elements"].([]any)
+	textEl := innerElements[0].(map[string]any)
+	if textEl["type"] != "text" {
+		t.Errorf("text element type = %q, want %q", textEl["type"], "text")
+	}
+	if textEl["text"] != "apiVersion: v1\nclusters: []" {
+		t.Errorf("text content = %q, want kubeconfig content", textEl["text"])
+	}
+}
+
+func TestEmojiFieldSerialization(t *testing.T) {
+	boolPtr := new(bool)
+	textObj := &slack.TextBlockObject{
+		Type:  slack.PlainTextType,
+		Text:  "Test",
+		Emoji: boolPtr,
+	}
+
+	data, err := json.Marshal(textObj)
+	if err != nil {
+		t.Fatalf("failed to marshal TextBlockObject: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	// With *bool set to new(bool) (false), emoji should be present and false
+	emoji, exists := parsed["emoji"]
+	if !exists {
+		t.Fatal("emoji field missing from serialized JSON")
+	}
+	if emoji != false {
+		t.Errorf("emoji = %v, want false", emoji)
+	}
+
+	// With nil *bool, emoji should be omitted
+	textObj.Emoji = nil
+	data, err = json.Marshal(textObj)
+	if err != nil {
+		t.Fatalf("failed to marshal TextBlockObject with nil emoji: %v", err)
+	}
+	var parsed2 map[string]any
+	if err := json.Unmarshal(data, &parsed2); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, exists := parsed2["emoji"]; exists {
+		t.Error("emoji field should be omitted when nil")
+	}
+}
+
 func TestBuildListResultModal(t *testing.T) {
 	tests := []struct {
 		name      string
