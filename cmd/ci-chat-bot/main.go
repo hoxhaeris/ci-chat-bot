@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/prow/pkg/metrics"
 	"sigs.k8s.io/prow/pkg/pjutil"
 
+	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
@@ -244,6 +245,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("unable to create image client: %w", err)
 	}
+	// Client to read the release controller's ReleasePayload CRD, the authoritative
+	// source for release acceptance (the ImageStream phase annotation is now legacy).
+	releasePayloadClient, err := dynamic.NewForConfig(releaseConfig)
+	if err != nil {
+		return fmt.Errorf("unable to create release payload client: %w", err)
+	}
 	releaseClient, err := corev1.NewForConfig(prowJobKubeconfig)
 	if err != nil {
 		return fmt.Errorf("unabel to create release client: %w", err)
@@ -403,6 +410,7 @@ func run() error {
 		prowClient.ProwV1(),
 		prowjobInformer,
 		imageClient,
+		releasePayloadClient,
 		buildClusterClientConfigs,
 		ghClient,
 		opt.ForcePROwner,

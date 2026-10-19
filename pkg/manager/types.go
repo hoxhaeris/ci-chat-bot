@@ -18,6 +18,7 @@ import (
 	imageclientset "github.com/openshift/client-go/image/clientset/versioned"
 	hivev1 "github.com/openshift/hive/apis/hive/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/dynamic"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	prowapiv1 "sigs.k8s.io/prow/pkg/apis/prowjobs/v1"
@@ -295,6 +296,16 @@ type jobManager struct {
 	forcePROwner        string
 
 	configResolver ConfigResolver
+
+	// releasePayloadClient reads the release controller's ReleasePayload CRD, which
+	// holds the authoritative acceptance phase for a release. The ImageStream
+	// release.openshift.io/phase annotation is now legacy and no longer maintained,
+	// so it is consulted only as a fallback. May be nil (then only the annotation is
+	// used); built from the release cluster config.
+	releasePayloadClient dynamic.Interface
+	// releasePayloadPhaseFn, when set, overrides the ReleasePayload CRD lookup (for
+	// tests). It returns the phase for a release tag, or "" when unavailable.
+	releasePayloadPhaseFn func(ns, tagName string) string
 
 	muJob struct {
 		lock    sync.Mutex

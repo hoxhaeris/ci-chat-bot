@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	imagev1 "github.com/openshift/api/image/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestDefaultMceUserConfigDuration(t *testing.T) {
@@ -371,4 +374,122 @@ func TestResolveToJobRejectsBuildWithBundle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReleasePayloadPhaseFromConditions(t *testing.T) {
+	t.Parallel()
+
+	payload := func(conds map[string]string) *unstructured.Unstructured {
+		var list []interface{}
+		for typ, status := range conds {
+			list = append(list, map[string]interface{}{"type": typ, "status": status})
+		}
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"status": map[string]interface{}{"conditions": list},
+		}}
+	}
+
+	tests := []struct {
+		name  string
+		conds map[string]string
+		want  string
+	}{
+		{name: "accepted", conds: map[string]string{"PayloadCreated": "True", "PayloadAccepted": "True"}, want: "Accepted"},
+		{name: "rejected", conds: map[string]string{"PayloadCreated": "True", "PayloadRejected": "True"}, want: "Rejected"},
+		{name: "failed", conds: map[string]string{"PayloadFailed": "True"}, want: "Failed"},
+		{name: "created only is ready", conds: map[string]string{"PayloadCreated": "True"}, want: "Ready"},
+		{name: "accepted false falls through to pending", conds: map[string]string{"PayloadAccepted": "False"}, want: "Pending"},
+		{name: "no conditions is pending", conds: map[string]string{}, want: "Pending"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := releasePayloadPhaseFromConditions(payload(tt.conds)); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func specTag(name, stream, phaseAnnotation, created string) imagev1.TagReference {
+	return imagev1.TagReference{
+		Name: name,
+		Annotations: map[string]string{
+			"release.openshift.io/name":              stream,
+			"release.openshift.io/phase":             phaseAnnotation,
+			"release.openshift.io/creationTimestamp": created,
+		},
+	}
+}
+
+func TestFindNewestImageSpecTagWithStream(t *testing.T) {
+	t.Parallel()
+
+	const ns = "ocp"
+	const stream = "5.1.0-0.nightly"
+
+	// three nightly tags, all stuck at Pending on the ImageStream annotation
+	is := &imagev1.ImageStream{Spec: imagev1.ImageStreamSpec{Tags: []imagev1.TagReference{
+		specTag("5.1.0-0.nightly-2026-10-16", stream, "Pending", "2026-10-16T00:00:00Z"),
+		specTag("5.1.0-0.nightly-2026-10-18", stream, "Pending", "2026-10-18T00:00:00Z"),
+		specTag("5.1.0-0.nightly-2026-10-17", stream, "Pending", "2026-10-17T00:00:00Z"),
+		specTag("5.0.0-0.nightly-2026-10-18", "5.0.0-0.nightly", "Pending", "2026-10-18T00:00:00Z"),
+	}}}
+
+	// managerWithPayloadPhases returns a jobManager whose ReleasePayload lookup is
+	// backed by the given tag->phase map (phase "" means no payload, i.e. NotFound).
+	managerWithPayloadPhases := func(phases map[string]string) *jobManager {
+		return &jobManager{releasePayloadPhaseFn: func(_, tagName string) string {
+			return phases[tagName]
+		}}
+	}
+
+	t.Run("prefers newest CRD-accepted tag despite Pending annotation", func(t *testing.T) {
+		t.Parallel()
+		m := managerWithPayloadPhases(map[string]string{
+			"5.1.0-0.nightly-2026-10-17": "Accepted",
+			"5.1.0-0.nightly-2026-10-18": "Rejected",
+			"5.1.0-0.nightly-2026-10-16": "Accepted",
+		})
+		got := m.findNewestImageSpecTagWithStream(is, ns, stream)
+		if got == nil || got.Name != "5.1.0-0.nightly-2026-10-17" {
+			t.Fatalf("expected newest accepted 2026-10-17, got %v", got)
+		}
+	})
+
+	t.Run("returns nil when CRD says none accepted", func(t *testing.T) {
+		t.Parallel()
+		m := managerWithPayloadPhases(map[string]string{
+			"5.1.0-0.nightly-2026-10-18": "Rejected",
+		})
+		if got := m.findNewestImageSpecTagWithStream(is, ns, stream); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("falls back to annotation when no ReleasePayload exists", func(t *testing.T) {
+		t.Parallel()
+		annotated := &imagev1.ImageStream{Spec: imagev1.ImageStreamSpec{Tags: []imagev1.TagReference{
+			specTag("5.1.0-0.nightly-2026-10-16", stream, "Accepted", "2026-10-16T00:00:00Z"),
+			specTag("5.1.0-0.nightly-2026-10-18", stream, "Pending", "2026-10-18T00:00:00Z"),
+		}}}
+		m := managerWithPayloadPhases(map[string]string{}) // all lookups return "" -> annotation fallback
+		got := m.findNewestImageSpecTagWithStream(annotated, ns, stream)
+		if got == nil || got.Name != "5.1.0-0.nightly-2026-10-16" {
+			t.Fatalf("expected annotation-accepted 2026-10-16, got %v", got)
+		}
+	})
+
+	t.Run("nil lookup uses annotation only", func(t *testing.T) {
+		t.Parallel()
+		annotated := &imagev1.ImageStream{Spec: imagev1.ImageStreamSpec{Tags: []imagev1.TagReference{
+			specTag("5.1.0-0.nightly-2026-10-18", stream, "Accepted", "2026-10-18T00:00:00Z"),
+		}}}
+		m := &jobManager{}
+		got := m.findNewestImageSpecTagWithStream(annotated, ns, stream)
+		if got == nil || got.Name != "5.1.0-0.nightly-2026-10-18" {
+			t.Fatalf("expected 2026-10-18 via annotation, got %v", got)
+		}
+	})
 }

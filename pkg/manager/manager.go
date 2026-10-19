@@ -31,10 +31,13 @@ import (
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 
 	clustermgmtv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 	imagev1 "github.com/openshift/api/image/v1"
@@ -141,6 +144,7 @@ func NewJobManager(
 	prowClient prowClient.ProwV1Interface,
 	prowInformer prowInformer.ProwJobInformer,
 	imageClient imageclientset.Interface,
+	releasePayloadClient dynamic.Interface,
 	buildClusterClientConfigMap utils.BuildClusterClientConfigMap,
 	githubClient github.Client,
 	forcePROwner string,
@@ -163,20 +167,21 @@ func NewJobManager(
 	orgDataService OrgDataService,
 ) *jobManager {
 	m := &jobManager{
-		requests:         make(map[string]*JobRequest),
-		jobs:             make(map[string]*Job),
-		clusterPrefix:    "chat-bot-",
-		maxClusters:      maxTotalClusters,
-		maxAge:           3 * time.Hour,
-		githubClient:     githubClient,
-		prowConfigLoader: prowConfigLoader,
-		prowClient:       prowClient,
-		prowScheduler:    strategy.Get(prowConfigLoader.Config(), logrus.WithField("interface", "scheduler")),
-		prowLister:       prowInformer.Lister(),
-		imageClient:      imageClient,
-		clusterClients:   buildClusterClientConfigMap,
-		prowNamespace:    "ci",
-		forcePROwner:     forcePROwner,
+		requests:             make(map[string]*JobRequest),
+		jobs:                 make(map[string]*Job),
+		clusterPrefix:        "chat-bot-",
+		maxClusters:          maxTotalClusters,
+		maxAge:               3 * time.Hour,
+		githubClient:         githubClient,
+		prowConfigLoader:     prowConfigLoader,
+		prowClient:           prowClient,
+		prowScheduler:        strategy.Get(prowConfigLoader.Config(), logrus.WithField("interface", "scheduler")),
+		prowLister:           prowInformer.Lister(),
+		imageClient:          imageClient,
+		releasePayloadClient: releasePayloadClient,
+		clusterClients:       buildClusterClientConfigMap,
+		prowNamespace:        "ci",
+		forcePROwner:         forcePROwner,
 
 		configResolver: configResolver,
 		workflowConfig: workflowConfig,
@@ -1346,15 +1351,15 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 		}
 
 		currentReleasePrefix := fmt.Sprintf("%d.%d", CurrentRelease.Major, CurrentRelease.Minor)
-		if m := reMajorMinorVersion.FindStringSubmatch(unresolved); m != nil {
-			if tag := findNewestImageSpecTagWithStream(is, fmt.Sprintf("%s.0-0.nightly%s", unresolved, archSuffix)); tag != nil {
+		if matches := reMajorMinorVersion.FindStringSubmatch(unresolved); matches != nil {
+			if tag := m.findNewestImageSpecTagWithStream(is, ns, fmt.Sprintf("%s.0-0.nightly%s", unresolved, archSuffix)); tag != nil {
 				klog.Infof("Resolved major.minor %s to nightly tag %s", imageOrVersion, tag.Name)
 				installSpec := pullSpecForTagRef(tag, ns, isName)
 				runSpec := ""
 				if architecture == "amd64" || architecture == "multi" {
 					runSpec = installSpec
 				} else {
-					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.nightly", unresolved))
+					runTag := m.findNewestImageSpecTagWithStream(amd64IS, "ocp", fmt.Sprintf("%s.0-0.nightly", unresolved))
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.nightly release is available to use as the %s test runner image", unresolved, architecture)
 					}
@@ -1362,14 +1367,14 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 				}
 				return installSpec, tag.Name, runSpec, nil
 			}
-			if tag := findNewestImageSpecTagWithStream(is, fmt.Sprintf("%s.0-0.ci%s", unresolved, archSuffix)); tag != nil {
+			if tag := m.findNewestImageSpecTagWithStream(is, ns, fmt.Sprintf("%s.0-0.ci%s", unresolved, archSuffix)); tag != nil {
 				klog.Infof("Resolved major.minor %s to ci tag %s", imageOrVersion, tag.Name)
 				installSpec := pullSpecForTagRef(tag, ns, isName)
 				runSpec := ""
 				if architecture == "amd64" || architecture == "multi" {
 					runSpec = installSpec
 				} else {
-					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%s.0-0.ci", unresolved))
+					runTag := m.findNewestImageSpecTagWithStream(amd64IS, "ocp", fmt.Sprintf("%s.0-0.ci", unresolved))
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no accepted amd64 %s.0-0.ci release is available to use as the %s test runner image", unresolved, architecture)
 					}
@@ -1427,7 +1432,7 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					if err != nil {
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Image, err)
 					}
-					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					runTag := m.findNewestImageSpecTagWithStream(amd64IS, "ocp", fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
 					}
@@ -1449,7 +1454,7 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 			return installSpec, name, runSpec, nil
 		}
 
-		if tag := findNewestImageSpecTagWithStream(is, unresolved); tag != nil {
+		if tag := m.findNewestImageSpecTagWithStream(is, ns, unresolved); tag != nil {
 			klog.Infof("Resolved %s to tag %s", imageOrVersion, tag.Name)
 			// identify nightly stream for runspec if not amd64
 			installSpec := pullSpecForTagRef(tag, ns, isName)
@@ -1464,13 +1469,13 @@ func (m *jobManager) ResolveImageOrVersion(imageOrVersion, defaultImageOrVersion
 					if err != nil {
 						return "", "", "", fmt.Errorf("failed to identify semver for image %s: %w", tag.Name, err)
 					}
-					runTag := findNewestImageSpecTagWithStream(amd64IS, fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
+					runTag := m.findNewestImageSpecTagWithStream(amd64IS, "ocp", fmt.Sprintf("%d.%d.0-0.nightly", ver.Major, ver.Minor))
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no accepted amd64 %d.%d.0-0.nightly release is available to use as the %s test runner image", ver.Major, ver.Minor, architecture)
 					}
 					runSpec = pullSpecForTagRef(runTag, "ocp", "release")
 				} else {
-					runTag := findNewestImageSpecTagWithStream(amd64IS, unresolved)
+					runTag := m.findNewestImageSpecTagWithStream(amd64IS, "ocp", unresolved)
 					if runTag == nil {
 						return "", "", "", fmt.Errorf("no accepted amd64 release matching %q is available to use as the %s test runner image", unresolved, architecture)
 					}
@@ -1545,21 +1550,108 @@ func findNewestStableImageSpecTagBySemanticMajor(is *imagev1.ImageStream, majorM
 	return nil
 }
 
-func findNewestImageSpecTagWithStream(is *imagev1.ImageStream, name string) *imagev1.TagReference {
-	var newest *imagev1.TagReference
+// findNewestImageSpecTagWithStream returns the newest accepted tag for the named
+// stream in the given ImageStream (ns is the ImageStream's namespace). Acceptance
+// is taken from the authoritative ReleasePayload CRD, falling back to the legacy
+// release.openshift.io/phase annotation when the CRD is unavailable. The release
+// controller moved the phase into the ReleasePayload CRD and no longer maintains
+// the ImageStream annotation (it is stuck at "Pending"), so reading the annotation
+// alone misses accepted nightly/ci builds.
+func (m *jobManager) findNewestImageSpecTagWithStream(is *imagev1.ImageStream, ns, name string) *imagev1.TagReference {
+	// gather the tags belonging to this stream, newest first, so we can stop at the
+	// first accepted one and avoid a ReleasePayload lookup for every tag
+	var candidates []*imagev1.TagReference
 	for i := range is.Spec.Tags {
 		tag := &is.Spec.Tags[i]
-		if tag.Annotations["release.openshift.io/phase"] != "Accepted" {
-			continue
-		}
-		if tag.Annotations["release.openshift.io/name"] != name {
-			continue
-		}
-		if newest == nil || newest.Annotations["release.openshift.io/creationTimestamp"] < tag.Annotations["release.openshift.io/creationTimestamp"] {
-			newest = tag
+		if tag.Annotations["release.openshift.io/name"] == name {
+			candidates = append(candidates, tag)
 		}
 	}
-	return newest
+	sort.Slice(candidates, func(a, b int) bool {
+		return candidates[a].Annotations["release.openshift.io/creationTimestamp"] > candidates[b].Annotations["release.openshift.io/creationTimestamp"]
+	})
+	for _, tag := range candidates {
+		if m.tagPhase(ns, tag) == releaseAcceptedPhase {
+			return tag
+		}
+	}
+	return nil
+}
+
+const releaseAcceptedPhase = "Accepted"
+
+// releasePayloadGVR is the GroupVersionResource of the release controller's
+// ReleasePayload CRD, which holds the authoritative acceptance phase for a release.
+var releasePayloadGVR = schema.GroupVersionResource{Group: "release.openshift.io", Version: "v1alpha1", Resource: "releasepayloads"}
+
+// tagPhase returns the acceptance phase of a release tag. It prefers the
+// ReleasePayload CRD (the source of truth) and falls back to the legacy
+// release.openshift.io/phase ImageStream annotation when the CRD cannot be read.
+func (m *jobManager) tagPhase(ns string, tag *imagev1.TagReference) string {
+	if phase := m.releasePayloadPhase(ns, tag.Name); phase != "" {
+		return phase
+	}
+	return tag.Annotations["release.openshift.io/phase"]
+}
+
+// releasePayloadPhase returns the phase of the ReleasePayload named tagName in ns.
+// It uses the injectable releasePayloadPhaseFn when set (tests), otherwise reads
+// the CRD. Returns "" when unavailable so callers fall back to the legacy annotation.
+func (m *jobManager) releasePayloadPhase(ns, tagName string) string {
+	if m.releasePayloadPhaseFn != nil {
+		return m.releasePayloadPhaseFn(ns, tagName)
+	}
+	return m.releasePayloadPhaseFromCRD(ns, tagName)
+}
+
+// releasePayloadPhaseFromCRD reads the ReleasePayload named tagName in ns and
+// derives its phase from the status conditions the same way the release controller
+// does (GetReleasePhase).
+func (m *jobManager) releasePayloadPhaseFromCRD(ns, tagName string) string {
+	if m.releasePayloadClient == nil {
+		return ""
+	}
+	obj, err := m.releasePayloadClient.Resource(releasePayloadGVR).Namespace(ns).Get(context.TODO(), tagName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			klog.Warningf("unable to read ReleasePayload %s/%s: %v", ns, tagName, err)
+		}
+		return ""
+	}
+	return releasePayloadPhaseFromConditions(obj)
+}
+
+// releasePayloadPhaseFromConditions mirrors the release controller's
+// GetReleasePhase: Accepted/Rejected/Failed win if true, otherwise Ready when the
+// payload is created, else Pending.
+func releasePayloadPhaseFromConditions(obj *unstructured.Unstructured) string {
+	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	created := false
+	for _, c := range conditions {
+		cond, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		condType, _ := cond["type"].(string)
+		status, _ := cond["status"].(string)
+		if status != "True" {
+			continue
+		}
+		switch condType {
+		case "PayloadAccepted":
+			return "Accepted"
+		case "PayloadRejected":
+			return "Rejected"
+		case "PayloadFailed":
+			return "Failed"
+		case "PayloadCreated":
+			created = true
+		}
+	}
+	if created {
+		return "Ready"
+	}
+	return "Pending"
 }
 
 func findImageStatusTag(is *imagev1.ImageStream, name string) (*imagev1.TagEvent, string) {
